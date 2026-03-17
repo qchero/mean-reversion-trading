@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Strategy {
+  id              String   @id @default(cuid())
+  symbol          String   @unique
+  // Initial Multiplier (j)
+  initialParamJ   Float
+  // Step Drop Multiplier (k)
+  stepParamK      Float
+  maxSteps        Int
+  stepAmount      Float
+  
+  // "True" if user toggled on automated execution
+  autoExecute     Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model DailyCandle {
+  id              String   @id @default(cuid())
+  symbol          String
+  date            String   // YYYY-MM-DD format
+  open            Float
+  high            Float
+  low             Float
+  close           Float
+  volume          Float
+  
+  createdAt       DateTime @default(now())
+
+  // Ensure we don't store duplicates for the same day and ticker
+  @@unique([symbol, date])
+}
+
+// Cached calculation results — invalidated when the lastDate changes
+model SymbolCache {
+  id              String   @id @default(cuid())
+  symbol          String   @unique
+  lastDate        String   // YYYY-MM-DD of the most recent candle used
+  sma200          Float
+  dailyVolatility Float
+  latestPrice     Float
+
+  updatedAt       DateTime @updatedAt
+}
