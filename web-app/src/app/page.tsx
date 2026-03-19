@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Container, Title, Text, Grid } from '@mantine/core';
 import StrategyForm from '@/components/StrategyForm';
 import StrategyCard from '@/components/StrategyCard';
-import { getStrategies, getStrategyPreviewData } from '@/app/actions';
+import { getStrategies, getBatchPreviewData } from '@/app/actions';
 import { Strategy } from '@prisma/client';
 
 interface StrategyMetrics {
@@ -21,19 +21,11 @@ export default function Home() {
   const loadStrategies = async () => {
     const data = await getStrategies();
 
-    // Fetch metrics for all unique symbols in parallel
+    // Batch fetch metrics for all symbols in a single server action
     const uniqueSymbols = [...new Set(data.map(s => s.symbol))];
-    const results = await Promise.all(
-      uniqueSymbols.map(async (symbol) => {
-        const res = await getStrategyPreviewData(symbol);
-        return { symbol, metrics: res.success && res.data ? res.data : null };
-      })
-    );
-
-    const map: Record<string, StrategyMetrics> = {};
-    for (const { symbol, metrics } of results) {
-      if (metrics) map[symbol] = metrics;
-    }
+    const map = uniqueSymbols.length > 0
+      ? await getBatchPreviewData(uniqueSymbols)
+      : {};
     setMetricsMap(map);
 
     // Sort by latestPrice / sma200 ASC (lowest ratio = furthest below SMA = most triggered)
@@ -61,7 +53,7 @@ export default function Home() {
         <Grid.Col span={{ base: 12, md: 4 }}>
           <StrategyForm onStrategyCreated={loadStrategies} />
         </Grid.Col>
-        
+
         <Grid.Col span={{ base: 12, md: 8 }}>
           {strategies.length === 0 ? (
             <Text c="dimmed" fs="italic" ta="center" mt="xl">

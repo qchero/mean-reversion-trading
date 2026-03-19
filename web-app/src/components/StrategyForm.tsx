@@ -17,10 +17,10 @@ export default function StrategyForm({ onStrategyCreated }: StrategyFormProps) {
   const form = useForm({
     initialValues: {
       symbol: '',
-      initialParamJ: 6,
+      initialParamJ: 7,
       stepParamK: 2,
-      maxSteps: 4,
-      stepAmount: 2500,
+      maxSteps: 2,
+      stepAmount: 5000,
     },
 
     validate: {

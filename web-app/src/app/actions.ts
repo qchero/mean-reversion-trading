@@ -137,6 +137,74 @@ export async function getStrategyPreviewData(symbol: string) {
   }
 }
 
+export async function getBatchPreviewData(symbols: string[]) {
+  const normalized = symbols.map(s => s.toUpperCase());
+
+  // Compute expected trading date once
+  const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const hourET = nowET.getHours();
+  const dayOfWeek = nowET.getDay();
+  const expectedEnd = new Date(nowET);
+  expectedEnd.setHours(0, 0, 0, 0);
+  if (dayOfWeek === 0) expectedEnd.setDate(expectedEnd.getDate() - 2);
+  else if (dayOfWeek === 6) expectedEnd.setDate(expectedEnd.getDate() - 1);
+  else if (hourET < 17) {
+    if (dayOfWeek === 1) expectedEnd.setDate(expectedEnd.getDate() - 3);
+    else expectedEnd.setDate(expectedEnd.getDate() - 1);
+  }
+  const expectedDate = `${expectedEnd.getFullYear()}-${String(expectedEnd.getMonth() + 1).padStart(2, '0')}-${String(expectedEnd.getDate()).padStart(2, '0')}`;
+
+  // Single DB query for all symbol caches
+  const caches = await prisma.symbolCache.findMany({
+    where: { symbol: { in: normalized } },
+  });
+  const cacheMap = new Map(caches.map(c => [c.symbol, c]));
+
+  // Fetch live prices in parallel
+  const priceResults = await Promise.all(
+    normalized.map(s => getLatestPrice(s).catch(() => null))
+  );
+  const priceMap = new Map(normalized.map((s, i) => [s, priceResults[i]]));
+
+  const results: Record<string, { sma200: number; dailyVolatility: number; latestPrice: number; lastDate: string }> = {};
+
+  // Process each symbol: use cache if fresh, else recalculate
+  await Promise.all(normalized.map(async (symbol) => {
+    const cached = cacheMap.get(symbol);
+    const livePrice = priceMap.get(symbol) ?? null;
+
+    if (cached && cached.lastDate >= expectedDate) {
+      results[symbol] = {
+        sma200: cached.sma200,
+        dailyVolatility: cached.dailyVolatility,
+        latestPrice: livePrice !== null ? livePrice : cached.latestPrice,
+        lastDate: cached.lastDate,
+      };
+      return;
+    }
+
+    // Cache miss — fetch + calculate + upsert
+    try {
+      const candles = await getOrFetchHistoricalData(symbol);
+      if (!candles || candles.length === 0) return;
+      const metrics = calculateStrategyMetrics(candles);
+      const resolvedPrice = livePrice !== null ? livePrice : metrics.latestPrice;
+
+      await prisma.symbolCache.upsert({
+        where: { symbol },
+        update: { lastDate: metrics.lastDate, sma200: metrics.sma200, dailyVolatility: metrics.dailyVolatility, latestPrice: resolvedPrice },
+        create: { symbol, lastDate: metrics.lastDate, sma200: metrics.sma200, dailyVolatility: metrics.dailyVolatility, latestPrice: resolvedPrice },
+      });
+
+      results[symbol] = { ...metrics, latestPrice: resolvedPrice };
+    } catch {
+      // skip failed symbols
+    }
+  }));
+
+  return results;
+}
+
 export async function deleteStrategy(id: string) {
   await prisma.strategy.delete({
     where: { id }

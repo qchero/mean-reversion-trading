@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -20,7 +20,7 @@ model Strategy {
   // "True" if user toggled on automated execution
   autoExecute     Boolean  @default(false)
 
-  // JSON string array of { step: number, shares: number, price: number }
+  // JSON array of StepTrade objects (see StrategyCard.tsx)
   executions      String   @default("[]")
 
   createdAt       DateTime @default(now())

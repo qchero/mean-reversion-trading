@@ -4,8 +4,9 @@ import { useState, useEffect } from 'react';
 import {
   Paper, Title, Text, Group, Grid, Switch, Badge, Table,
   ActionIcon, NumberInput, Button, Collapse, UnstyledButton, Skeleton, Modal,
+  TextInput,
 } from '@mantine/core';
-import { IconTrash, IconChevronDown, IconChevronUp, IconEdit } from '@tabler/icons-react';
+import { IconTrash, IconChevronDown, IconChevronUp, IconEdit, IconCurrencyDollar } from '@tabler/icons-react';
 import { updateStrategy, deleteStrategy, getStrategyPreviewData } from '@/app/actions';
 import { Strategy } from '@prisma/client';
 
@@ -16,10 +17,47 @@ interface Metrics {
   lastDate: string;
 }
 
+interface StepTrade {
+  id: string;
+  step: number;
+  shares: number;
+  buyPrice: number;
+  buyDate: string;
+  sellPrice?: number;
+  sellDate?: string;
+}
+
 interface StrategyCardProps {
   strategy: Strategy;
   metrics: Metrics | null;
   onUpdate: () => void;
+}
+
+function generateId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+function parseTrades(raw: string): StepTrade[] {
+  try {
+    const arr = JSON.parse(raw || "[]");
+    return arr.map((e: any) => {
+      if (e.id && 'buyPrice' in e) return e as StepTrade;
+      // backward compat: old format { step, shares, price }
+      return {
+        id: generateId(),
+        step: e.step,
+        shares: e.shares,
+        buyPrice: e.price,
+        buyDate: '',
+      } as StepTrade;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate }: StrategyCardProps) {
@@ -27,46 +65,59 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
   const [metrics, setMetrics] = useState<Metrics | null>(metricsProp);
   const [metricsLoading, setMetricsLoading] = useState(!metricsProp);
 
-  const [executions, setExecutions] = useState<any[]>(() => {
-    try {
-      return JSON.parse((strategy as any).executions || "[]");
-    } catch {
-      return [];
-    }
-  });
+  const [trades, setTrades] = useState<StepTrade[]>(() => parseTrades((strategy as any).executions || "[]"));
 
   useEffect(() => {
-    try {
-      setExecutions(JSON.parse((strategy as any).executions || "[]"));
-    } catch {
-      setExecutions([]);
-    }
+    setTrades(parseTrades((strategy as any).executions || "[]"));
   }, [strategy.id, (strategy as any).executions]);
-  
-  const [execModal, setExecModal] = useState<{ step: number; shares: number | string; price: number | string } | null>(null);
 
-  const handleSaveExecution = async () => {
-    if (!execModal) return;
-    const newExecs = [...executions];
-    const idx = newExecs.findIndex(e => e.step === execModal.step);
-    const payload = { step: execModal.step, shares: Number(execModal.shares), price: Number(execModal.price) };
-    if (idx >= 0) newExecs[idx] = payload;
-    else newExecs.push(payload);
-    
-    setExecutions(newExecs);
-    setExecModal(null);
-    await updateStrategy(strategy.id, { executions: JSON.stringify(newExecs) });
-    onUpdate();
+  // Modal state
+  const [buyModal, setBuyModal] = useState<{
+    step: number; shares: number | string; price: number | string; date: string;
+  } | null>(null);
+
+  const [sellModal, setSellModal] = useState<{
+    trade: StepTrade; price: number | string; date: string;
+  } | null>(null);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deleteTradeId, setDeleteTradeId] = useState<string | null>(null);
+
+  const saveTrades = async (newTrades: StepTrade[]) => {
+    setTrades(newTrades);
+    await updateStrategy(strategy.id, { executions: JSON.stringify(newTrades) });
   };
 
-  const handleClearExecution = async () => {
-    if (!execModal) return;
-    const newExecs = executions.filter(e => e.step !== execModal.step);
-    
-    setExecutions(newExecs);
-    setExecModal(null);
-    await updateStrategy(strategy.id, { executions: JSON.stringify(newExecs) });
-    onUpdate();
+  const handleSaveBuy = async () => {
+    if (!buyModal) return;
+    const newTrade: StepTrade = {
+      id: generateId(),
+      step: buyModal.step,
+      shares: Number(buyModal.shares),
+      buyPrice: Number(buyModal.price),
+      buyDate: buyModal.date || todayStr(),
+    };
+    setBuyModal(null);
+    await saveTrades([...trades, newTrade]);
+  };
+
+  const handleSaveSell = async () => {
+    if (!sellModal) return;
+    const updated = trades.map(t =>
+      t.id === sellModal.trade.id
+        ? { ...t, sellPrice: Number(sellModal.price), sellDate: sellModal.date || todayStr() }
+        : t
+    );
+    setSellModal(null);
+    await saveTrades(updated);
+  };
+
+  const handleDeleteTrade = async (tradeId: string) => {
+    setDeleteTradeId(null);
+    setBuyModal(null);
+    setSellModal(null);
+    await saveTrades(trades.filter(t => t.id !== tradeId));
   };
 
   // If parent didn't provide metrics (still loading), self-fetch as fallback
@@ -122,9 +173,15 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
   };
 
   const handleDelete = async () => {
+    setDeleteConfirm(false);
     await deleteStrategy(strategy.id);
     onUpdate();
   };
+
+  // Derived trade lists
+  const openTrades = trades.filter(t => t.sellPrice == null);
+  const closedTrades = trades.filter(t => t.sellPrice != null);
+  const totalClosedPnl = closedTrades.reduce((sum, t) => sum + (t.sellPrice! - t.buyPrice) * t.shares, 0);
 
   const generatePreviewSteps = () => {
     if (!metrics?.sma200 || !j || !k || !maxSteps || !amount) return [];
@@ -139,29 +196,31 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
       const multiplier = _j + i * _k;
       const theoBuyPrice = metrics.sma200 * (1 - multiplier * metrics.dailyVolatility);
       const prevMultiplier = _j + (i - 1) * _k;
-      const sellPrice = metrics.sma200 * (1 - prevMultiplier * metrics.dailyVolatility);
+      const theoSellPrice = metrics.sma200 * (1 - prevMultiplier * metrics.dailyVolatility);
       const triggered = metrics.latestPrice > 0 && metrics.latestPrice <= theoBuyPrice;
 
-      const exec = executions.find(e => e.step === stepNum);
-      const isBought = !!exec;
+      // Find the open trade for this step (if any)
+      const openTrade = trades.find(t => t.step === stepNum && t.sellPrice == null);
+      const isBought = !!openTrade;
 
-      const buyPrice = exec && exec.price > 0 ? exec.price : theoBuyPrice;
-      const shares = exec && exec.shares > 0 ? exec.shares : (_amount / theoBuyPrice);
-      const costBasis = exec && exec.shares > 0 && exec.price > 0 ? (exec.price * exec.shares) : _amount;
+      const buyPrice = openTrade ? openTrade.buyPrice : theoBuyPrice;
+      const shares = openTrade ? openTrade.shares : (_amount / theoBuyPrice);
+      const costBasis = openTrade ? (openTrade.buyPrice * openTrade.shares) : _amount;
 
-      const estProfit = shares * (sellPrice - buyPrice);
+      const estProfit = shares * (theoSellPrice - buyPrice);
       const estProfitPct = (estProfit / costBasis) * 100;
 
       steps.push({
         step: stepNum,
         buyPrice: buyPrice.toFixed(2),
-        sellPrice: sellPrice.toFixed(2),
+        sellPrice: theoSellPrice.toFixed(2),
         shares: shares.toFixed(4),
         amount: costBasis.toFixed(2),
         estProfit: estProfit.toFixed(2),
         estProfitPct: estProfitPct.toFixed(2),
         triggered,
         isBought,
+        openTrade: openTrade || null,
       });
     }
     return steps;
@@ -169,6 +228,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
 
   const steps = generatePreviewSteps();
   const triggeredCount = steps.filter(s => s.triggered).length;
+  const boughtCount = steps.filter(s => s.isBought).length;
   const ratio = metrics && metrics.sma200 > 0 ? metrics.latestPrice / metrics.sma200 : null;
 
   const jError =
@@ -189,7 +249,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
   return (
     <Paper shadow="sm" radius="md" p="xl" className="glass-card" mb="lg">
       {/* Header row — always visible */}
-      <Group justify="space-between" mb={expanded ? 'md' : 0}>
+      <Group justify="space-between">
         <UnstyledButton onClick={() => setExpanded(v => !v)} style={{ flex: 1 }}>
           <Group>
             <Title order={3}>{strategy.symbol}</Title>
@@ -206,14 +266,14 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
             onChange={toggleAutoExecute}
             color="teal"
           />
-          <ActionIcon color="red" variant="subtle" onClick={handleDelete}>
+          <ActionIcon color="red" variant="subtle" onClick={() => setDeleteConfirm(true)}>
             <IconTrash size={18} />
           </ActionIcon>
         </Group>
       </Group>
 
-      {/* Collapsed summary — show when not expanded */}
-      {!expanded && metrics && (
+      {/* Metrics summary — always visible */}
+      {metrics && (
         <>
           <Grid mt="sm" align="center">
             <Grid.Col span={3}>
@@ -235,10 +295,16 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
               <Text size="xs" c="dimmed">Daily Volatility (σ)</Text>
               <Text fw={600}>{(metrics.dailyVolatility * 100).toFixed(2)}%</Text>
             </Grid.Col>
-            <Grid.Col span={3}>
-              <Text size="xs" c="dimmed">Steps Reached</Text>
+            <Grid.Col span={1.5}>
+              <Text size="xs" c="dimmed">Reached</Text>
               <Text fw={600} c={triggeredCount > 0 ? 'orange' : 'dimmed'}>
-                {triggeredCount} / {strategy.maxSteps}
+                {triggeredCount} / {maxSteps}
+              </Text>
+            </Grid.Col>
+            <Grid.Col span={1.5}>
+              <Text size="xs" c="dimmed">Bought</Text>
+              <Text fw={600} c={boughtCount > 0 ? 'blue' : 'dimmed'}>
+                {boughtCount} / {maxSteps}
               </Text>
             </Grid.Col>
           </Grid>
@@ -250,25 +316,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
       <Collapse in={expanded}>
         {metrics ? (
           <>
-            <Grid align="flex-end" mb="lg" mt="md">
-              <Grid.Col span={4}>
-                <Text size="sm" c="dimmed">SMA 200</Text>
-                <Text fw={700} size="xl">${metrics.sma200.toFixed(2)}</Text>
-              </Grid.Col>
-              <Grid.Col span={4}>
-                <Text size="sm" c="dimmed">Latest Price</Text>
-                <Text fw={700} size="xl" c={metrics.latestPrice < metrics.sma200 ? 'red' : 'teal'}>
-                  ${metrics.latestPrice.toFixed(2)}
-                </Text>
-              </Grid.Col>
-              <Grid.Col span={4}>
-                <Text size="sm" c="dimmed">Daily Volatility (σ)</Text>
-                <Text fw={700} size="xl">{(metrics.dailyVolatility * 100).toFixed(2)}%</Text>
-              </Grid.Col>
-            </Grid>
-            <Text size="xs" c="dimmed" mb="md">Data as of {metrics.lastDate}</Text>
-
-            <Title order={6} mb="sm" c="dimmed">Live Parameters</Title>
+            <Title order={6} mt="md" mb="sm" c="dimmed">Live Parameters</Title>
             {strategy.autoExecute && (
               <Text size="xs" c="orange" mb="sm">⚠ Parameters are locked while Auto Execute is active.</Text>
             )}
@@ -355,14 +403,89 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                       <Text span size="xs" c="dimmed" ml={4}>({row.estProfitPct}%)</Text>
                     </Table.Td>
                     <Table.Td>
-                      <ActionIcon variant="subtle" color="gray" onClick={() => setExecModal({ step: row.step, shares: row.shares, price: row.buyPrice })}>
-                        <IconEdit size={16} />
-                      </ActionIcon>
+                      {row.isBought && row.openTrade ? (
+                        <ActionIcon variant="subtle" color="teal" onClick={() => setSellModal({
+                          trade: row.openTrade!,
+                          price: row.sellPrice,
+                          date: todayStr(),
+                        })}>
+                          <IconCurrencyDollar size={16} />
+                        </ActionIcon>
+                      ) : (
+                        <ActionIcon variant="subtle" color="gray" onClick={() => setBuyModal({
+                          step: row.step,
+                          shares: row.shares,
+                          price: row.buyPrice,
+                          date: todayStr(),
+                        })}>
+                          <IconEdit size={16} />
+                        </ActionIcon>
+                      )}
                     </Table.Td>
                   </Table.Tr>
                 ))}
               </Table.Tbody>
             </Table>
+
+            {/* Trade History */}
+            {closedTrades.length > 0 && (
+              <>
+                <UnstyledButton onClick={() => setHistoryOpen(v => !v)} mt="lg" mb="xs">
+                  <Group gap={6}>
+                    <Title order={5}>
+                      Trade History ({closedTrades.length})
+                    </Title>
+                    <Text span size="sm" fw={600} c={totalClosedPnl >= 0 ? 'teal' : 'red'}>
+                      ${totalClosedPnl.toFixed(2)}
+                    </Text>
+                    {historyOpen ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+                  </Group>
+                </UnstyledButton>
+                <Collapse in={historyOpen}>
+                  <Table striped highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Step</Table.Th>
+                        <Table.Th>Shares</Table.Th>
+                        <Table.Th>Buy</Table.Th>
+                        <Table.Th>Sell</Table.Th>
+                        <Table.Th>P&L</Table.Th>
+                        <Table.Th></Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {[...closedTrades].reverse().map(t => {
+                        const pnl = (t.sellPrice! - t.buyPrice) * t.shares;
+                        const pnlPct = ((t.sellPrice! / t.buyPrice) - 1) * 100;
+                        return (
+                          <Table.Tr key={t.id}>
+                            <Table.Td>{t.step}</Table.Td>
+                            <Table.Td>{t.shares.toFixed(4)}</Table.Td>
+                            <Table.Td>
+                              ${t.buyPrice.toFixed(2)}
+                              {t.buyDate && <Text span size="xs" c="dimmed" ml={4}>{t.buyDate}</Text>}
+                            </Table.Td>
+                            <Table.Td>
+                              ${t.sellPrice!.toFixed(2)}
+                              {t.sellDate && <Text span size="xs" c="dimmed" ml={4}>{t.sellDate}</Text>}
+                            </Table.Td>
+                            <Table.Td c={pnl >= 0 ? 'teal' : 'red'} fw={500}>
+                              ${pnl.toFixed(2)}
+                              <Text span size="xs" c="dimmed" ml={4}>({pnlPct.toFixed(2)}%)</Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <ActionIcon variant="subtle" color="red" size="sm" onClick={() => setDeleteTradeId(t.id)}>
+                                <IconTrash size={14} />
+                              </ActionIcon>
+                            </Table.Td>
+                          </Table.Tr>
+                        );
+                      })}
+                    </Table.Tbody>
+                  </Table>
+                </Collapse>
+              </>
+            )}
 
             {!strategy.autoExecute && (
               <Button mt="lg" fullWidth color="teal" variant="light" onClick={() => alert('Execute simulated!')}>
@@ -379,32 +502,90 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
         )}
       </Collapse>
 
-      <Modal opened={!!execModal} onClose={() => setExecModal(null)} title={`Record Trade for Step ${execModal?.step}`}>
-        <NumberInput
-          label="Shares Bought"
-          value={execModal?.shares}
-          onChange={(v) => setExecModal(m => m ? { ...m, shares: v } : null)}
-          mb="sm"
-          min={0}
-        />
-        <NumberInput
-          label="Average Price"
-          value={execModal?.price}
-          onChange={(v) => setExecModal(m => m ? { ...m, price: v } : null)}
-          mb="xl"
-          min={0}
-          decimalScale={4}
-          prefix="$"
-        />
-        <Group grow>
-          <Button color="blue" onClick={handleSaveExecution}>
-            Save Execution
-          </Button>
-          {executions.some(e => e.step === execModal?.step) && (
-            <Button color="red" variant="light" onClick={handleClearExecution}>
-              Clear
+      {/* Buy Modal */}
+      <Modal opened={!!buyModal} onClose={() => setBuyModal(null)} title={`Record Buy — Step ${buyModal?.step}`}>
+        {buyModal && (
+          <>
+            <NumberInput
+              label="Shares"
+              value={buyModal.shares}
+              onChange={(v) => setBuyModal(m => m ? { ...m, shares: v } : null)}
+              mb="sm"
+              min={0}
+            />
+            <NumberInput
+              label="Buy Price"
+              value={buyModal.price}
+              onChange={(v) => setBuyModal(m => m ? { ...m, price: v } : null)}
+              mb="sm"
+              min={0}
+              decimalScale={4}
+              prefix="$"
+            />
+            <TextInput
+              label="Date"
+              type="date"
+              value={buyModal.date}
+              onChange={(e) => setBuyModal(m => m ? { ...m, date: e.target.value } : null)}
+              mb="xl"
+            />
+            <Button fullWidth color="blue" onClick={handleSaveBuy}>
+              Save Buy
             </Button>
-          )}
+          </>
+        )}
+      </Modal>
+
+      {/* Sell Modal */}
+      <Modal opened={!!sellModal} onClose={() => setSellModal(null)} title={`Close Trade — Step ${sellModal?.trade.step}`}>
+        {sellModal && (
+          <>
+            <Text size="sm" c="dimmed" mb="md">
+              Bought {sellModal.trade.shares.toFixed(4)} shares @ ${sellModal.trade.buyPrice.toFixed(2)}
+              {sellModal.trade.buyDate && ` on ${sellModal.trade.buyDate}`}
+            </Text>
+            <NumberInput
+              label="Sell Price"
+              value={sellModal.price}
+              onChange={(v) => setSellModal(m => m ? { ...m, price: v } : null)}
+              mb="sm"
+              min={0}
+              decimalScale={4}
+              prefix="$"
+            />
+            <TextInput
+              label="Date"
+              type="date"
+              value={sellModal.date}
+              onChange={(e) => setSellModal(m => m ? { ...m, date: e.target.value } : null)}
+              mb="xl"
+            />
+            <Group grow>
+              <Button color="teal" onClick={handleSaveSell}>
+                Record Sale
+              </Button>
+              <Button color="red" variant="light" onClick={() => { setSellModal(null); setDeleteTradeId(sellModal.trade.id); }}>
+                Delete Trade
+              </Button>
+            </Group>
+          </>
+        )}
+      </Modal>
+      {/* Delete Strategy Confirm */}
+      <Modal opened={deleteConfirm} onClose={() => setDeleteConfirm(false)} title="Delete Strategy" size="sm">
+        <Text mb="xl">Delete strategy for <Text span fw={700}>{strategy.symbol}</Text>? This will remove all trade records.</Text>
+        <Group grow>
+          <Button variant="default" onClick={() => setDeleteConfirm(false)}>Cancel</Button>
+          <Button color="red" onClick={handleDelete}>Delete</Button>
+        </Group>
+      </Modal>
+
+      {/* Delete Trade Confirm */}
+      <Modal opened={!!deleteTradeId} onClose={() => setDeleteTradeId(null)} title="Delete Trade" size="sm">
+        <Text mb="xl">Delete this trade record?</Text>
+        <Group grow>
+          <Button variant="default" onClick={() => setDeleteTradeId(null)}>Cancel</Button>
+          <Button color="red" onClick={() => deleteTradeId && handleDeleteTrade(deleteTradeId)}>Delete</Button>
         </Group>
       </Modal>
     </Paper>
