@@ -1,36 +1,83 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Mean Reversion Trading Dashboard
 
-## Getting Started
+A Next.js web app for designing, monitoring, and (soon) auto-executing volatility-scaled mean reversion strategies on US equities.
 
-First, run the development server:
+## How It Works
+
+The strategy buys when a stock drops far enough below its 200-day SMA, measured in units of daily volatility (sigma). It sells when price recovers one step up.
+
+**Parameters per strategy:**
+- **Symbol** — ticker (e.g. AAPL, TSLA)
+- **j (Initial Multiplier)** — first buy level = `SMA200 * (1 - j * sigma)`
+- **k (Step Drop Multiplier)** — spacing between levels = `k * sigma`
+- **Max Steps** — number of buy levels
+- **Step Amount ($)** — capital per buy step
+
+**Example:** j=6, k=1.5, 4 steps on a stock with SMA=$200, sigma=1.5%
+- Step 1 buy at $200 * (1 - 6*0.015) = $182.00, sell at $200 * (1 - 4.5*0.015) = $186.50
+- Step 2 buy at $200 * (1 - 7.5*0.015) = $177.50, sell at $182.00
+- ...and so on
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Framework | Next.js 16 (App Router, Server Actions) |
+| UI | Mantine v8 + Tabler Icons |
+| ORM | Prisma 6 |
+| Database | SQLite (local) — migrating to cloud Postgres |
+| Market Data | Polygon.io REST API (daily candles + snapshots) |
+| Language | TypeScript (strict) |
+
+## Quick Start
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd web-app
+cp .env.example .env        # Add your POLYGON_API_KEY
+npm install
+npx prisma db push           # Create/sync SQLite database
+npm run dev                   # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Project Structure
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+web-app/
+├── prisma/
+│   └── schema.prisma          # Strategy, DailyCandle, SymbolCache models
+├── src/
+│   ├── app/
+│   │   ├── page.tsx           # Dashboard — strategy list sorted by price/SMA ratio
+│   │   ├── actions.ts         # Server actions: CRUD strategies, fetch metrics
+│   │   ├── layout.tsx         # Mantine provider, theme config
+│   │   └── globals.css        # Dark/light mode, glass-card styles
+│   ├── components/
+│   │   ├── StrategyForm.tsx   # New strategy form (symbol, j, k, steps, amount)
+│   │   └── StrategyCard.tsx   # Strategy card: metrics, live params, step table, trade recording
+│   └── lib/
+│       ├── polygon.ts         # Polygon API: fetch candles, cache, SMA/sigma calc, snapshots
+│       └── prisma.ts          # Prisma singleton client
+├── prisma.config.ts           # Prisma datasource config
+├── package.json
+└── DEVELOPMENT.md             # Architecture deep-dive and roadmap
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Related: Python Backtesting Engine
 
-## Learn More
+The `analysis/` directory contains a Python backtesting engine used for parameter sweep research:
 
-To learn more about Next.js, take a look at the following resources:
+```
+analysis/
+├── config.py          # Tickers, default params (j, k, levels, budget)
+├── data.py            # Polygon 15-min bar fetcher with parquet cache
+├── strategy.py        # Volatility-scaled simulation (15-min resolution)
+├── backtest.py        # Performance summary metrics
+├── main.py            # Run single-config sim across all tickers
+├── sweep_vol.py       # Parameter sweep (parallel, sorted by P&L or ROC)
+├── sweep_yearly.py    # Yearly sweep with per-ticker detail + min-ops constraint
+├── plot.py            # Matplotlib visualization
+├── sweep_plan.md      # Sweep methodology and results (Rounds 1-4)
+└── sweep_results_*.md # Detailed per-ticker per-year results
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+**Key finding from backtesting:** `j=6sigma, k=1.5sigma` dominates across most configurations, yielding ~37-41% annualized ROC over the 2022-2026 period with sufficient trade frequency.

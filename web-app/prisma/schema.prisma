@@ -20,6 +20,9 @@ model Strategy {
   // "True" if user toggled on automated execution
   autoExecute     Boolean  @default(false)
 
+  // JSON string array of { step: number, shares: number, price: number }
+  executions      String   @default("[]")
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }

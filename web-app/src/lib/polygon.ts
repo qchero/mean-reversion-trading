@@ -25,18 +25,17 @@ export interface PolygonResponse {
 }
 
 /**
- * Helper to get date strings in YYYY-MM-DD format
+ * Convert a Date to YYYY-MM-DD in Eastern Time (market timezone).
+ * Polygon timestamps represent market time, so we must interpret them in ET.
  */
 export function formatDate(date: Date): string {
-  const d = new Date(date);
-  let month = '' + (d.getMonth() + 1);
-  let day = '' + d.getDate();
-  const year = d.getFullYear();
-
-  if (month.length < 2) month = '0' + month;
-  if (day.length < 2) day = '0' + day;
-
-  return [year, month, day].join('-');
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+  return parts; // 'en-CA' locale already returns YYYY-MM-DD
 }
 
 /**
@@ -55,23 +54,34 @@ function getStartDateFor200TradingDays(endDate: Date): Date {
 export async function getOrFetchHistoricalData(symbol: string) {
   const normalizedSymbol = symbol.toUpperCase();
   
-  // 1. Determine "yesterday"
-  const today = new Date();
-  today.setHours(0, 0, 0, 0); // normalize today to midnight
-  
-  // Determine yesterday based on weekend rules (basic logic: if Monday, yesterday is Friday)
-  const yesterday = new Date(today);
-  if (today.getDay() === 1) { // Monday
-    yesterday.setDate(today.getDate() - 3); // Friday
-  } else if (today.getDay() === 0) { // Sunday
-    yesterday.setDate(today.getDate() - 2); // Friday
-  } else {
-    yesterday.setDate(today.getDate() - 1);
-  }
+  // 1. Determine the latest trading day with finalized data.
+  //    Market closes at 4pm ET; we consider data final 1 hour later (5pm ET).
+  const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const hourET = nowET.getHours();
+  const dayOfWeek = nowET.getDay(); // 0=Sun, 6=Sat
 
-  const startDate = getStartDateFor200TradingDays(yesterday);
+  let endDate = new Date(nowET);
+  endDate.setHours(0, 0, 0, 0);
+
+  if (dayOfWeek === 0) {
+    // Sunday → Friday
+    endDate.setDate(endDate.getDate() - 2);
+  } else if (dayOfWeek === 6) {
+    // Saturday → Friday
+    endDate.setDate(endDate.getDate() - 1);
+  } else if (hourET < 17) {
+    // Weekday but before 5pm ET → previous trading day
+    if (dayOfWeek === 1) {
+      endDate.setDate(endDate.getDate() - 3); // Mon before 5pm → Friday
+    } else {
+      endDate.setDate(endDate.getDate() - 1);
+    }
+  }
+  // else: weekday after 5pm ET → endDate = today (data is final)
+
+  const startDate = getStartDateFor200TradingDays(endDate);
   const startDateStr = formatDate(startDate);
-  const endDateStr = formatDate(yesterday);
+  const endDateStr = formatDate(endDate);
 
   // 2. See what we already have in the database for this range
   const cachedCandles = await prisma.dailyCandle.findMany({
@@ -216,5 +226,35 @@ export function calculateStrategyMetrics(candles: { close: number; date: string 
     latestPrice,
     lastDate,
   };
+}
+
+/**
+ * Fetches the real-time or most recent price snapshot for a symbol.
+ */
+export async function getLatestPrice(symbol: string): Promise<number | null> {
+  const normalizedSymbol = symbol.toUpperCase();
+  const url = `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/${normalizedSymbol}?apiKey=${POLYGON_API_KEY}`;
+
+  try {
+    const response = await fetch(url, { next: { revalidate: 60 } }); // Cache for 60 seconds
+    if (!response.ok) {
+      console.warn(`Polygon snapshot API error: ${response.statusText}`);
+      return null;
+    }
+
+    const data = await response.json();
+    if (!data.ticker) {
+      return null;
+    }
+
+    // Try to get the absolute most recent trade price, fallback to minute close, day close, previous day close.
+    const ticker = data.ticker;
+    const price = ticker.lastTrade?.p || ticker.min?.c || ticker.day?.c || ticker.prevDay?.c;
+    
+    return price ?? null;
+  } catch (error) {
+    console.error("Error fetching latest price snapshot:", error);
+    return null;
+  }
 }
 

@@ -3,9 +3,9 @@
 import { useState, useEffect } from 'react';
 import {
   Paper, Title, Text, Group, Grid, Switch, Badge, Table,
-  ActionIcon, NumberInput, Button, Collapse, UnstyledButton, Skeleton,
+  ActionIcon, NumberInput, Button, Collapse, UnstyledButton, Skeleton, Modal,
 } from '@mantine/core';
-import { IconTrash, IconChevronDown, IconChevronUp } from '@tabler/icons-react';
+import { IconTrash, IconChevronDown, IconChevronUp, IconEdit } from '@tabler/icons-react';
 import { updateStrategy, deleteStrategy, getStrategyPreviewData } from '@/app/actions';
 import { Strategy } from '@prisma/client';
 
@@ -26,6 +26,48 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
   const [expanded, setExpanded] = useState(false);
   const [metrics, setMetrics] = useState<Metrics | null>(metricsProp);
   const [metricsLoading, setMetricsLoading] = useState(!metricsProp);
+
+  const [executions, setExecutions] = useState<any[]>(() => {
+    try {
+      return JSON.parse((strategy as any).executions || "[]");
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      setExecutions(JSON.parse((strategy as any).executions || "[]"));
+    } catch {
+      setExecutions([]);
+    }
+  }, [strategy.id, (strategy as any).executions]);
+  
+  const [execModal, setExecModal] = useState<{ step: number; shares: number | string; price: number | string } | null>(null);
+
+  const handleSaveExecution = async () => {
+    if (!execModal) return;
+    const newExecs = [...executions];
+    const idx = newExecs.findIndex(e => e.step === execModal.step);
+    const payload = { step: execModal.step, shares: Number(execModal.shares), price: Number(execModal.price) };
+    if (idx >= 0) newExecs[idx] = payload;
+    else newExecs.push(payload);
+    
+    setExecutions(newExecs);
+    setExecModal(null);
+    await updateStrategy(strategy.id, { executions: JSON.stringify(newExecs) });
+    onUpdate();
+  };
+
+  const handleClearExecution = async () => {
+    if (!execModal) return;
+    const newExecs = executions.filter(e => e.step !== execModal.step);
+    
+    setExecutions(newExecs);
+    setExecModal(null);
+    await updateStrategy(strategy.id, { executions: JSON.stringify(newExecs) });
+    onUpdate();
+  };
 
   // If parent didn't provide metrics (still loading), self-fetch as fallback
   useEffect(() => {
@@ -93,25 +135,33 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
     const _amount = Number(amount);
 
     for (let i = 0; i < _max; i++) {
+      const stepNum = i + 1;
       const multiplier = _j + i * _k;
-      const buyPrice = metrics.sma200 * (1 - multiplier * metrics.dailyVolatility);
+      const theoBuyPrice = metrics.sma200 * (1 - multiplier * metrics.dailyVolatility);
       const prevMultiplier = _j + (i - 1) * _k;
       const sellPrice = metrics.sma200 * (1 - prevMultiplier * metrics.dailyVolatility);
-      const triggered = metrics.latestPrice > 0 && metrics.latestPrice <= buyPrice;
+      const triggered = metrics.latestPrice > 0 && metrics.latestPrice <= theoBuyPrice;
 
-      const shares = _amount / buyPrice;
+      const exec = executions.find(e => e.step === stepNum);
+      const isBought = !!exec;
+
+      const buyPrice = exec && exec.price > 0 ? exec.price : theoBuyPrice;
+      const shares = exec && exec.shares > 0 ? exec.shares : (_amount / theoBuyPrice);
+      const costBasis = exec && exec.shares > 0 && exec.price > 0 ? (exec.price * exec.shares) : _amount;
+
       const estProfit = shares * (sellPrice - buyPrice);
-      const estProfitPct = (estProfit / _amount) * 100;
+      const estProfitPct = (estProfit / costBasis) * 100;
 
       steps.push({
-        step: i + 1,
+        step: stepNum,
         buyPrice: buyPrice.toFixed(2),
         sellPrice: sellPrice.toFixed(2),
         shares: shares.toFixed(4),
-        amount: _amount.toFixed(2),
+        amount: costBasis.toFixed(2),
         estProfit: estProfit.toFixed(2),
         estProfitPct: estProfitPct.toFixed(2),
         triggered,
+        isBought,
       });
     }
     return steps;
@@ -277,29 +327,37 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                   <Table.Th>Est. Shares</Table.Th>
                   <Table.Th>Allocated</Table.Th>
                   <Table.Th>Est. Profit</Table.Th>
+                  <Table.Th></Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
                 {steps.map((row) => (
                   <Table.Tr
                     key={row.step}
-                    bg={row.triggered ? 'var(--mantine-color-green-light)' : undefined}
+                    bg={row.isBought ? 'var(--mantine-color-blue-light)' : row.triggered ? 'var(--mantine-color-green-light)' : undefined}
                   >
                     <Table.Td>
                       <Group gap={6}>
                         {row.step}
-                        {row.triggered && (
+                        {row.isBought ? (
+                          <Badge size="xs" color="blue" variant="filled">bought</Badge>
+                        ) : row.triggered ? (
                           <Badge size="xs" color="green" variant="filled">triggered</Badge>
-                        )}
+                        ) : null}
                       </Group>
                     </Table.Td>
-                    <Table.Td c="green" fw={500}>${row.buyPrice}</Table.Td>
+                    <Table.Td c={row.isBought ? "blue" : "green"} fw={500}>${row.buyPrice}</Table.Td>
                     <Table.Td c="blue" fw={500}>${row.sellPrice}</Table.Td>
                     <Table.Td>{row.shares}</Table.Td>
                     <Table.Td>${row.amount}</Table.Td>
                     <Table.Td c="teal" fw={500}>
                       ${row.estProfit}
                       <Text span size="xs" c="dimmed" ml={4}>({row.estProfitPct}%)</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <ActionIcon variant="subtle" color="gray" onClick={() => setExecModal({ step: row.step, shares: row.shares, price: row.buyPrice })}>
+                        <IconEdit size={16} />
+                      </ActionIcon>
                     </Table.Td>
                   </Table.Tr>
                 ))}
@@ -320,6 +378,35 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
           </Grid>
         )}
       </Collapse>
+
+      <Modal opened={!!execModal} onClose={() => setExecModal(null)} title={`Record Trade for Step ${execModal?.step}`}>
+        <NumberInput
+          label="Shares Bought"
+          value={execModal?.shares}
+          onChange={(v) => setExecModal(m => m ? { ...m, shares: v } : null)}
+          mb="sm"
+          min={0}
+        />
+        <NumberInput
+          label="Average Price"
+          value={execModal?.price}
+          onChange={(v) => setExecModal(m => m ? { ...m, price: v } : null)}
+          mb="xl"
+          min={0}
+          decimalScale={4}
+          prefix="$"
+        />
+        <Group grow>
+          <Button color="blue" onClick={handleSaveExecution}>
+            Save Execution
+          </Button>
+          {executions.some(e => e.step === execModal?.step) && (
+            <Button color="red" variant="light" onClick={handleClearExecution}>
+              Clear
+            </Button>
+          )}
+        </Group>
+      </Modal>
     </Paper>
   );
 }

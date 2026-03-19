@@ -1,7 +1,7 @@
 "use server";
 
 import prisma from '@/lib/prisma';
-import { getOrFetchHistoricalData, calculateStrategyMetrics } from '@/lib/polygon';
+import { getOrFetchHistoricalData, calculateStrategyMetrics, getLatestPrice } from '@/lib/polygon';
 import { revalidatePath } from 'next/cache';
 
 export async function createStrategy(data: {
@@ -37,6 +37,7 @@ export async function updateStrategy(id: string, data: {
   maxSteps?: number;
   stepAmount?: number;
   autoExecute?: boolean;
+  executions?: string;
 }) {
   const strategy = await prisma.strategy.update({
     where: { id },
@@ -61,14 +62,28 @@ export async function getStrategyPreviewData(symbol: string) {
   try {
     const normalizedSymbol = symbol.toUpperCase();
 
-    // Compute the expected last trading day (yesterday, weekend-aware)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const yesterday = new Date(today);
-    if (today.getDay() === 1) yesterday.setDate(today.getDate() - 3);       // Mon → Fri
-    else if (today.getDay() === 0) yesterday.setDate(today.getDate() - 2);  // Sun → Fri
-    else yesterday.setDate(today.getDate() - 1);
-    const expectedDate = yesterday.toISOString().split('T')[0];
+    // Compute the latest trading day with finalized data (same logic as polygon.ts)
+    const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const hourET = nowET.getHours();
+    const dayOfWeek = nowET.getDay();
+
+    const expectedEnd = new Date(nowET);
+    expectedEnd.setHours(0, 0, 0, 0);
+
+    if (dayOfWeek === 0) expectedEnd.setDate(expectedEnd.getDate() - 2);        // Sun → Fri
+    else if (dayOfWeek === 6) expectedEnd.setDate(expectedEnd.getDate() - 1);   // Sat → Fri
+    else if (hourET < 17) {
+      if (dayOfWeek === 1) expectedEnd.setDate(expectedEnd.getDate() - 3);      // Mon < 5pm → Fri
+      else expectedEnd.setDate(expectedEnd.getDate() - 1);
+    }
+
+    const year = expectedEnd.getFullYear();
+    const month = String(expectedEnd.getMonth() + 1).padStart(2, '0');
+    const day = String(expectedEnd.getDate()).padStart(2, '0');
+    const expectedDate = `${year}-${month}-${day}`;
+
+    // Concurrently try fetching the live snapshot price
+    const livePricePromise = getLatestPrice(normalizedSymbol).catch(() => null);
 
     // 1. Fast path: hit SymbolCache first — single tiny DB query, no candle work needed
     const cached = await prisma.symbolCache.findUnique({
@@ -76,12 +91,13 @@ export async function getStrategyPreviewData(symbol: string) {
     });
 
     if (cached && cached.lastDate >= expectedDate) {
+      const livePrice = await livePricePromise;
       return {
         success: true,
         data: {
           sma200: cached.sma200,
           dailyVolatility: cached.dailyVolatility,
-          latestPrice: cached.latestPrice,
+          latestPrice: livePrice !== null ? livePrice : cached.latestPrice,
           lastDate: cached.lastDate,
         },
       };
@@ -92,6 +108,8 @@ export async function getStrategyPreviewData(symbol: string) {
     if (!candles || candles.length === 0) throw new Error('No candle data available');
 
     const metrics = calculateStrategyMetrics(candles);
+    const livePrice = await livePricePromise;
+    const resolvedLatestPrice = livePrice !== null ? livePrice : metrics.latestPrice;
 
     await prisma.symbolCache.upsert({
       where: { symbol: normalizedSymbol },
@@ -99,18 +117,18 @@ export async function getStrategyPreviewData(symbol: string) {
         lastDate: metrics.lastDate,
         sma200: metrics.sma200,
         dailyVolatility: metrics.dailyVolatility,
-        latestPrice: metrics.latestPrice,
+        latestPrice: resolvedLatestPrice,
       },
       create: {
         symbol: normalizedSymbol,
         lastDate: metrics.lastDate,
         sma200: metrics.sma200,
         dailyVolatility: metrics.dailyVolatility,
-        latestPrice: metrics.latestPrice,
+        latestPrice: resolvedLatestPrice,
       },
     });
 
-    return { success: true, data: metrics };
+    return { success: true, data: { ...metrics, latestPrice: resolvedLatestPrice } };
   } catch (error: any) {
     return {
       success: false,
