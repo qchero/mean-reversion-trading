@@ -37,7 +37,6 @@ export async function updateStrategy(id: string, data: {
   maxSteps?: number;
   stepAmount?: number;
   autoExecute?: boolean;
-  executions?: string;
 }) {
   const strategy = await prisma.strategy.update({
     where: { id },
@@ -210,4 +209,79 @@ export async function deleteStrategy(id: string) {
     where: { id }
   });
   revalidatePath('/');
+}
+
+export async function getStrategyTrades(strategyId: string) {
+  return prisma.trade.findMany({
+    where: { strategyId },
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
+export async function getAllTrades() {
+  const trades = await prisma.trade.findMany({
+    orderBy: { createdAt: 'desc' },
+  });
+  const map: Record<string, typeof trades> = {};
+  for (const t of trades) {
+    (map[t.strategyId] ||= []).push(t);
+  }
+  return map;
+}
+
+export async function createTrade(data: {
+  strategyId: string;
+  step: number;
+  shares: number;
+  buyPrice: number;
+  buyDate: string;
+}) {
+  const trade = await prisma.trade.create({ data });
+  revalidatePath('/');
+  return trade;
+}
+
+export async function updateTrade(id: string, data: {
+  sellPrice?: number;
+  sellDate?: string;
+}) {
+  const trade = await prisma.trade.update({ where: { id }, data });
+  revalidatePath('/');
+  return trade;
+}
+
+export async function deleteTrade(id: string) {
+  await prisma.trade.delete({ where: { id } });
+  revalidatePath('/');
+}
+
+export async function getStrategyOrders(strategyId: string) {
+  return prisma.order.findMany({
+    where: { strategyId },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+}
+
+export async function deleteOrder(id: string) {
+  // Only allow deleting completed orders to avoid orphaning live IBKR orders
+  const order = await prisma.order.findUnique({ where: { id } });
+  if (!order) throw new Error('Order not found');
+  if (order.status !== 'filled' && order.status !== 'cancelled') {
+    throw new Error('Cannot delete an active order');
+  }
+  await prisma.order.delete({ where: { id } });
+  revalidatePath('/');
+}
+
+export async function getRecentOrderEvents(sinceMs: number) {
+  const since = new Date(sinceMs);
+  return prisma.order.findMany({
+    where: {
+      updatedAt: { gte: since },
+      status: { in: ['filled', 'cancelled'] },
+    },
+    include: { strategy: { select: { symbol: true } } },
+    orderBy: { updatedAt: 'desc' },
+  });
 }

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { Container, Title, Text, Grid } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import StrategyForm from '@/components/StrategyForm';
 import StrategyCard from '@/components/StrategyCard';
-import { getStrategies, getBatchPreviewData } from '@/app/actions';
-import { Strategy } from '@prisma/client';
+import { getStrategies, getBatchPreviewData, getAllTrades, getRecentOrderEvents } from '@/app/actions';
+import { Strategy, Trade } from '@prisma/client';
 
 interface StrategyMetrics {
   sma200: number;
@@ -17,21 +18,26 @@ interface StrategyMetrics {
 export default function Home() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [metricsMap, setMetricsMap] = useState<Record<string, StrategyMetrics>>({});
+  const [tradesMap, setTradesMap] = useState<Record<string, Trade[]>>({});
+  const notifiedOrderIds = useRef(new Set<string>());
+  const lastPollTime = useRef(Date.now());
 
   const loadStrategies = async () => {
     const data = await getStrategies();
 
-    // Batch fetch metrics for all symbols in a single server action
+    // Batch fetch metrics and trades in parallel
     const uniqueSymbols = [...new Set(data.map(s => s.symbol))];
-    const map = uniqueSymbols.length > 0
-      ? await getBatchPreviewData(uniqueSymbols)
-      : {};
-    setMetricsMap(map);
+    const [metricsResult, tradesResult] = await Promise.all([
+      uniqueSymbols.length > 0 ? getBatchPreviewData(uniqueSymbols) : {} as Record<string, StrategyMetrics>,
+      getAllTrades(),
+    ]);
+    setMetricsMap(metricsResult);
+    setTradesMap(tradesResult);
 
     // Sort by latestPrice / sma200 ASC (lowest ratio = furthest below SMA = most triggered)
     const sorted = [...data].sort((a, b) => {
-      const mA = map[a.symbol];
-      const mB = map[b.symbol];
+      const mA = metricsResult[a.symbol];
+      const mB = metricsResult[b.symbol];
       const ratioA = mA && mA.sma200 > 0 ? mA.latestPrice / mA.sma200 : 1;
       const ratioB = mB && mB.sma200 > 0 ? mB.latestPrice / mB.sma200 : 1;
       return ratioA - ratioB;
@@ -40,9 +46,46 @@ export default function Home() {
     setStrategies(sorted);
   };
 
+  // Poll for order events and show toast notifications
+  const pollOrderEvents = useCallback(async () => {
+    try {
+      const events = await getRecentOrderEvents(lastPollTime.current);
+      lastPollTime.current = Date.now();
+
+      for (const event of events) {
+        if (notifiedOrderIds.current.has(event.id)) continue;
+        notifiedOrderIds.current.add(event.id);
+
+        const symbol = (event as any).strategy?.symbol || '???';
+        const isFilled = event.status === 'filled';
+        const filledInfo = event.filledQty > 0
+          ? `${event.filledQty}/${event.totalQty} shares @ $${event.avgFillPrice?.toFixed(2) || event.limitPrice.toFixed(2)}`
+          : 'not filled';
+
+        notifications.show({
+          title: `${symbol} Step ${event.step}: ${event.side} ${isFilled ? 'Filled' : 'Cancelled'}`,
+          message: filledInfo,
+          color: isFilled ? 'teal' : 'gray',
+          autoClose: 8000,
+        });
+      }
+
+      // If there were fills, refresh strategies to pick up new trade records
+      if (events.some(e => e.status === 'filled' && e.filledQty > 0)) {
+        loadStrategies();
+      }
+    } catch {
+      // silently ignore poll errors
+    }
+  }, []);
+
   useEffect(() => {
     loadStrategies();
-  }, []);
+
+    // Poll for order notifications every 5 seconds
+    const interval = setInterval(pollOrderEvents, 5000);
+    return () => clearInterval(interval);
+  }, [pollOrderEvents]);
 
   return (
     <Container size="lg" py="xl">
@@ -65,6 +108,7 @@ export default function Home() {
                 key={s.id}
                 strategy={s}
                 metrics={metricsMap[s.symbol] ?? null}
+                trades={tradesMap[s.id] ?? []}
                 onUpdate={loadStrategies}
               />
             ))

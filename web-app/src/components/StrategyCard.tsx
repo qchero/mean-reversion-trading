@@ -4,11 +4,15 @@ import { useState, useEffect } from 'react';
 import {
   Paper, Title, Text, Group, Grid, Switch, Badge, Table,
   ActionIcon, NumberInput, Button, Collapse, UnstyledButton, Skeleton, Modal,
-  TextInput,
+  TextInput, Divider,
 } from '@mantine/core';
 import { IconTrash, IconChevronDown, IconChevronUp, IconEdit, IconCurrencyDollar } from '@tabler/icons-react';
-import { updateStrategy, deleteStrategy, getStrategyPreviewData } from '@/app/actions';
-import { Strategy } from '@prisma/client';
+import {
+  updateStrategy, deleteStrategy, deleteOrder,
+  getStrategyPreviewData, getStrategyOrders,
+  createTrade, updateTrade, deleteTrade,
+} from '@/app/actions';
+import { Strategy, Order, Trade } from '@prisma/client';
 
 interface Metrics {
   sma200: number;
@@ -17,59 +21,29 @@ interface Metrics {
   lastDate: string;
 }
 
-interface StepTrade {
-  id: string;
-  step: number;
-  shares: number;
-  buyPrice: number;
-  buyDate: string;
-  sellPrice?: number;
-  sellDate?: string;
-}
-
 interface StrategyCardProps {
   strategy: Strategy;
   metrics: Metrics | null;
+  trades: Trade[];
   onUpdate: () => void;
-}
-
-function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-}
-
-function parseTrades(raw: string): StepTrade[] {
-  try {
-    const arr = JSON.parse(raw || "[]");
-    return arr.map((e: any) => {
-      if (e.id && 'buyPrice' in e) return e as StepTrade;
-      // backward compat: old format { step, shares, price }
-      return {
-        id: generateId(),
-        step: e.step,
-        shares: e.shares,
-        buyPrice: e.price,
-        buyDate: '',
-      } as StepTrade;
-    });
-  } catch {
-    return [];
-  }
 }
 
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate }: StrategyCardProps) {
+export default function StrategyCard({ strategy, metrics: metricsProp, trades: tradesProp, onUpdate }: StrategyCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [autoExecute, setAutoExecute] = useState(strategy.autoExecute);
   const [metrics, setMetrics] = useState<Metrics | null>(metricsProp);
   const [metricsLoading, setMetricsLoading] = useState(!metricsProp);
 
-  const [trades, setTrades] = useState<StepTrade[]>(() => parseTrades((strategy as any).executions || "[]"));
+  const [trades, setTrades] = useState<Trade[]>(tradesProp);
 
+  // Sync trades when parent re-fetches
   useEffect(() => {
-    setTrades(parseTrades((strategy as any).executions || "[]"));
-  }, [strategy.id, (strategy as any).executions]);
+    setTrades(tradesProp);
+  }, [tradesProp]);
 
   // Modal state
   const [buyModal, setBuyModal] = useState<{
@@ -77,47 +51,58 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
   } | null>(null);
 
   const [sellModal, setSellModal] = useState<{
-    trade: StepTrade; price: number | string; date: string;
+    trade: Trade; price: number | string; date: string;
   } | null>(null);
 
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [ordersOpen, setOrdersOpen] = useState(false);
+  const [orders, setOrders] = useState<Order[]>([]);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteTradeId, setDeleteTradeId] = useState<string | null>(null);
 
-  const saveTrades = async (newTrades: StepTrade[]) => {
-    setTrades(newTrades);
-    await updateStrategy(strategy.id, { executions: JSON.stringify(newTrades) });
-  };
+  // Poll orders when expanded
+  useEffect(() => {
+    if (!expanded) return;
+    let cancelled = false;
+    const fetchOrders = async () => {
+      const data = await getStrategyOrders(strategy.id);
+      if (!cancelled) setOrders(data);
+    };
+    fetchOrders();
+    const interval = setInterval(fetchOrders, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [expanded, strategy.id]);
 
   const handleSaveBuy = async () => {
     if (!buyModal) return;
-    const newTrade: StepTrade = {
-      id: generateId(),
+    const data = {
+      strategyId: strategy.id,
       step: buyModal.step,
       shares: Number(buyModal.shares),
       buyPrice: Number(buyModal.price),
       buyDate: buyModal.date || todayStr(),
     };
     setBuyModal(null);
-    await saveTrades([...trades, newTrade]);
+    const newTrade = await createTrade(data);
+    setTrades(prev => [newTrade, ...prev]);
   };
 
   const handleSaveSell = async () => {
     if (!sellModal) return;
-    const updated = trades.map(t =>
-      t.id === sellModal.trade.id
-        ? { ...t, sellPrice: Number(sellModal.price), sellDate: sellModal.date || todayStr() }
-        : t
-    );
+    const updated = await updateTrade(sellModal.trade.id, {
+      sellPrice: Number(sellModal.price),
+      sellDate: sellModal.date || todayStr(),
+    });
     setSellModal(null);
-    await saveTrades(updated);
+    setTrades(prev => prev.map(t => t.id === updated.id ? updated : t));
   };
 
   const handleDeleteTrade = async (tradeId: string) => {
     setDeleteTradeId(null);
     setBuyModal(null);
     setSellModal(null);
-    await saveTrades(trades.filter(t => t.id !== tradeId));
+    await deleteTrade(tradeId);
+    setTrades(prev => prev.filter(t => t.id !== tradeId));
   };
 
   // If parent didn't provide metrics (still loading), self-fetch as fallback
@@ -168,8 +153,14 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
   }, [j, k, maxSteps, amount, strategy.id, strategy]);
 
   const toggleAutoExecute = async () => {
-    await updateStrategy(strategy.id, { autoExecute: !strategy.autoExecute });
-    onUpdate();
+    const next = !autoExecute;
+    setAutoExecute(next); // optimistic
+    try {
+      await updateStrategy(strategy.id, { autoExecute: next });
+      onUpdate();
+    } catch {
+      setAutoExecute(!next); // revert
+    }
   };
 
   const handleDelete = async () => {
@@ -210,6 +201,11 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
       const estProfit = shares * (theoSellPrice - buyPrice);
       const estProfitPct = (estProfit / costBasis) * 100;
 
+      // Find active order for this step
+      const activeOrder = orders.find(
+        o => o.step === stepNum && (o.status === 'submitted' || o.status === 'partial' || o.status === 'pending')
+      );
+
       steps.push({
         step: stepNum,
         buyPrice: buyPrice.toFixed(2),
@@ -221,6 +217,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
         triggered,
         isBought,
         openTrade: openTrade || null,
+        activeOrder: activeOrder || null,
       });
     }
     return steps;
@@ -253,8 +250,8 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
         <UnstyledButton onClick={() => setExpanded(v => !v)} style={{ flex: 1 }}>
           <Group>
             <Title order={3}>{strategy.symbol}</Title>
-            <Badge color={strategy.autoExecute ? 'green' : 'gray'}>
-              {strategy.autoExecute ? 'Auto Active' : 'Manual'}
+            <Badge color={autoExecute ? 'green' : 'gray'}>
+              {autoExecute ? 'Auto Active' : 'Manual'}
             </Badge>
             {expanded ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
           </Group>
@@ -262,7 +259,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
         <Group>
           <Switch
             label="Auto Execute"
-            checked={strategy.autoExecute}
+            checked={autoExecute}
             onChange={toggleAutoExecute}
             color="teal"
           />
@@ -317,7 +314,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
         {metrics ? (
           <>
             <Title order={6} mt="md" mb="sm" c="dimmed">Live Parameters</Title>
-            {strategy.autoExecute && (
+            {autoExecute && (
               <Text size="xs" c="orange" mb="sm">⚠ Parameters are locked while Auto Execute is active.</Text>
             )}
             <Grid mb="xl">
@@ -328,7 +325,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                   onChange={setJ}
                   min={0.01}
                   step={0.1}
-                  disabled={strategy.autoExecute}
+                  disabled={autoExecute}
                   error={jError}
                 />
               </Grid.Col>
@@ -339,7 +336,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                   onChange={setK}
                   min={0.01}
                   step={0.1}
-                  disabled={strategy.autoExecute}
+                  disabled={autoExecute}
                   error={lastStepError}
                 />
               </Grid.Col>
@@ -349,7 +346,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                   value={maxSteps}
                   onChange={setMaxSteps}
                   min={1}
-                  disabled={strategy.autoExecute}
+                  disabled={autoExecute}
                   error={lastStepError ? 'Reduce steps or k' : undefined}
                 />
               </Grid.Col>
@@ -360,7 +357,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                   onChange={setAmount}
                   prefix="$"
                   min={1}
-                  disabled={strategy.autoExecute}
+                  disabled={autoExecute}
                 />
               </Grid.Col>
             </Grid>
@@ -387,7 +384,12 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                     <Table.Td>
                       <Group gap={6}>
                         {row.step}
-                        {row.isBought ? (
+                        {row.activeOrder ? (
+                          <Badge size="xs" color="yellow" variant="filled">
+                            {row.activeOrder.side === 'BUY' ? 'buying' : 'selling'}
+                            {row.activeOrder.filledQty > 0 && ` ${row.activeOrder.filledQty}/${row.activeOrder.totalQty}`}
+                          </Badge>
+                        ) : row.isBought ? (
                           <Badge size="xs" color="blue" variant="filled">bought</Badge>
                         ) : row.triggered ? (
                           <Badge size="xs" color="green" variant="filled">triggered</Badge>
@@ -403,23 +405,25 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                       <Text span size="xs" c="dimmed" ml={4}>({row.estProfitPct}%)</Text>
                     </Table.Td>
                     <Table.Td>
-                      {row.isBought && row.openTrade ? (
-                        <ActionIcon variant="subtle" color="teal" onClick={() => setSellModal({
-                          trade: row.openTrade!,
-                          price: row.sellPrice,
-                          date: todayStr(),
-                        })}>
-                          <IconCurrencyDollar size={16} />
-                        </ActionIcon>
-                      ) : (
-                        <ActionIcon variant="subtle" color="gray" onClick={() => setBuyModal({
-                          step: row.step,
-                          shares: row.shares,
-                          price: row.buyPrice,
-                          date: todayStr(),
-                        })}>
-                          <IconEdit size={16} />
-                        </ActionIcon>
+                      {!autoExecute && (
+                        row.isBought && row.openTrade ? (
+                          <ActionIcon variant="subtle" color="teal" onClick={() => setSellModal({
+                            trade: row.openTrade!,
+                            price: row.sellPrice,
+                            date: todayStr(),
+                          })}>
+                            <IconCurrencyDollar size={16} />
+                          </ActionIcon>
+                        ) : (
+                          <ActionIcon variant="subtle" color="gray" onClick={() => setBuyModal({
+                            step: row.step,
+                            shares: row.shares,
+                            price: row.buyPrice,
+                            date: todayStr(),
+                          })}>
+                            <IconEdit size={16} />
+                          </ActionIcon>
+                        )
                       )}
                     </Table.Td>
                   </Table.Tr>
@@ -427,10 +431,14 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
               </Table.Tbody>
             </Table>
 
-            {/* Trade History */}
+            {/* Trade History & Order Activity */}
+            {(closedTrades.length > 0 || orders.length > 0) && (
+              <Divider my="lg" />
+            )}
+
             {closedTrades.length > 0 && (
               <>
-                <UnstyledButton onClick={() => setHistoryOpen(v => !v)} mt="lg" mb="xs">
+                <UnstyledButton onClick={() => setHistoryOpen(v => !v)} mb="xs">
                   <Group gap={6}>
                     <Title order={5}>
                       Trade History ({closedTrades.length})
@@ -442,7 +450,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
                   </Group>
                 </UnstyledButton>
                 <Collapse in={historyOpen}>
-                  <Table striped highlightOnHover>
+                  <Table striped highlightOnHover mb="md">
                     <Table.Thead>
                       <Table.Tr>
                         <Table.Th>Step</Table.Th>
@@ -487,7 +495,83 @@ export default function StrategyCard({ strategy, metrics: metricsProp, onUpdate 
               </>
             )}
 
-            {!strategy.autoExecute && (
+            {orders.length > 0 && (
+              <>
+                <UnstyledButton onClick={() => setOrdersOpen(v => !v)} mb="xs">
+                  <Group gap={6}>
+                    <Title order={5}>Order Activity ({orders.length})</Title>
+                    {ordersOpen ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+                  </Group>
+                </UnstyledButton>
+                <Collapse in={ordersOpen}>
+                  <Table striped highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Step</Table.Th>
+                        <Table.Th>Side</Table.Th>
+                        <Table.Th>Qty</Table.Th>
+                        <Table.Th>Limit</Table.Th>
+                        <Table.Th>Filled</Table.Th>
+                        <Table.Th>Status</Table.Th>
+                        <Table.Th>Time</Table.Th>
+                        <Table.Th></Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {orders.map(o => (
+                        <Table.Tr key={o.id}>
+                          <Table.Td>{o.step}</Table.Td>
+                          <Table.Td>
+                            <Badge size="xs" color={o.side === 'BUY' ? 'green' : 'red'} variant="light">
+                              {o.side}
+                            </Badge>
+                          </Table.Td>
+                          <Table.Td>{o.totalQty}</Table.Td>
+                          <Table.Td>${o.limitPrice.toFixed(2)}</Table.Td>
+                          <Table.Td>
+                            {o.filledQty}/{o.totalQty}
+                            {o.avgFillPrice && (
+                              <Text span size="xs" c="dimmed" ml={4}>@ ${o.avgFillPrice.toFixed(2)}</Text>
+                            )}
+                          </Table.Td>
+                          <Table.Td>
+                            <Badge
+                              size="xs"
+                              variant="light"
+                              color={
+                                o.status === 'filled' ? 'teal' :
+                                o.status === 'cancelled' ? 'gray' :
+                                o.status === 'partial' ? 'yellow' :
+                                'blue'
+                              }
+                            >
+                              {o.status}
+                            </Badge>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="xs" c="dimmed">
+                              {new Date(o.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            </Text>
+                          </Table.Td>
+                          <Table.Td>
+                            {(o.status === 'filled' || o.status === 'cancelled') && (
+                              <ActionIcon variant="subtle" color="red" size="sm" onClick={async () => {
+                                await deleteOrder(o.id);
+                                setOrders(prev => prev.filter(x => x.id !== o.id));
+                              }}>
+                                <IconTrash size={14} />
+                              </ActionIcon>
+                            )}
+                          </Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </Collapse>
+              </>
+            )}
+
+            {!autoExecute && (
               <Button mt="lg" fullWidth color="teal" variant="light" onClick={() => alert('Execute simulated!')}>
                 Execute Now
               </Button>

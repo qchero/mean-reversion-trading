@@ -1,8 +1,10 @@
 // core styles are required for all packages
 import '@mantine/core/styles.css';
+import '@mantine/notifications/styles.css';
 import './globals.css';
 
 import { ColorSchemeScript, MantineProvider, createTheme } from '@mantine/core';
+import { Notifications } from '@mantine/notifications';
 
 export const metadata = {
   title: 'Mean Reversion Trading',
@@ -26,6 +28,7 @@ export default function RootLayout({
       </head>
       <body>
         <MantineProvider theme={theme} defaultColorScheme="auto">
+          <Notifications position="top-right" />
           {children}
         </MantineProvider>
       </body>

@@ -16,15 +16,55 @@ model Strategy {
   stepParamK      Float
   maxSteps        Int
   stepAmount      Float
-  
+
   // "True" if user toggled on automated execution
   autoExecute     Boolean  @default(false)
 
-  // JSON array of StepTrade objects (see StrategyCard.tsx)
-  executions      String   @default("[]")
+  trades          Trade[]
+  orders          Order[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+model Trade {
+  id              String   @id @default(cuid())
+  strategyId      String
+  strategy        Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  step            Int
+  shares          Float
+  buyPrice        Float
+  buyDate         String   // YYYY-MM-DD
+  sellPrice       Float?
+  sellDate        String?  // YYYY-MM-DD
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([strategyId])
+}
+
+model Order {
+  id              String   @id @default(cuid())
+  strategyId      String
+  strategy        Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  step            Int
+  side            String   // "BUY" or "SELL"
+  ibkrOrderId     Int?     // IBKR's unique order ID
+  status          String   @default("pending") // pending, submitted, filled, cancelled
+  limitPrice      Float
+  totalQty        Float
+  filledQty       Float    @default(0)
+  avgFillPrice    Float?
+  expiresAt       DateTime?
+  filledAt        DateTime?
+  cancelledAt     DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([strategyId])
+  @@index([status])
 }
 
 model DailyCandle {
