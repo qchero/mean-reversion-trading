@@ -9,19 +9,13 @@
 
 import { PrismaClient, Strategy, Order, Trade } from '@prisma/client';
 import { IBKRClient, MarketTick, OrderFill } from './ibkr';
+import { StepLevel, calculateLevels, evaluateTick, roundShares } from './trading-logic';
 
 const prisma = new PrismaClient();
 
 const STRATEGY_RELOAD_MS = 60 * 1000; // reload strategies every minute
 
 // ── Types ──
-
-interface StepLevel {
-  step: number;
-  buyPrice: number;
-  sellPrice: number;
-  shares: number;  // shares to buy (stepAmount / buyPrice)
-}
 
 interface StrategyState {
   strategy: Strategy;
@@ -35,6 +29,16 @@ function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Check if current time is within US regular trading hours (9:30am–4:00pm ET) on a weekday. */
+function isMarketOpen(): boolean {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day = et.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+  const minutes = et.getHours() * 60 + et.getMinutes();
+  return minutes >= 570 && minutes < 960; // 9:30=570, 16:00=960
+}
+
 // ── Engine ──
 
 export class TradingEngine {
@@ -45,14 +49,19 @@ export class TradingEngine {
   private running = false;
   private reloadTimer: ReturnType<typeof setInterval> | null = null;
   private simulate = false;
+  private lastTicks = new Map<string, MarketTick>(); // last injected price per symbol (sim mode)
+  private simTickTimer: ReturnType<typeof setInterval> | null = null;
+  private lastLogTime = new Map<string, number>();   // symbol → last log timestamp
+  private readonly LOG_INTERVAL_MS = 60_000;         // log tick digest at most once per minute
 
   constructor(client: IBKRClient, simulate = false) {
     this.ibkr = client;
     this.simulate = simulate;
   }
 
-  /** Inject a tick manually (simulate mode). Skips real market data subscription. */
+  /** Inject a tick manually (simulate mode). Stores the price and re-evaluates continuously. */
   injectTick(tick: MarketTick) {
+    this.lastTicks.set(tick.symbol, tick);
     this.handleTick(tick);
   }
 
@@ -95,6 +104,15 @@ export class TradingEngine {
     this.running = true;
     this.reloadTimer = setInterval(() => this.loadStrategies(), STRATEGY_RELOAD_MS);
 
+    // In simulate mode, replay last injected prices every 5s (mimics live tick stream)
+    if (this.simulate) {
+      this.simTickTimer = setInterval(() => {
+        for (const tick of this.lastTicks.values()) {
+          this.handleTick(tick);
+        }
+      }, 5000);
+    }
+
     console.log('[Engine] Running. Press Ctrl+C to stop.');
   }
 
@@ -103,6 +121,7 @@ export class TradingEngine {
     this.running = false;
 
     if (this.reloadTimer) clearInterval(this.reloadTimer);
+    if (this.simTickTimer) clearInterval(this.simTickTimer);
 
     this.ibkr.disconnect();
     await prisma.$disconnect();
@@ -112,71 +131,75 @@ export class TradingEngine {
   // ── Strategy Loading ──
 
   async loadStrategies() {
-    const strategies = await prisma.strategy.findMany({
-      where: { autoExecute: true },
-    });
-
-    const currentSymbols = new Set(strategies.map((s) => s.symbol));
-    const prevSymbols = new Set(this.strategies.keys());
-
-    // Unsubscribe removed symbols
-    for (const sym of prevSymbols) {
-      if (!currentSymbols.has(sym)) {
-        if (!this.simulate) {
-          this.ibkr.unsubscribeMarketData(sym);
-        }
-        this.strategies.delete(sym);
-        console.log(`[Engine] Removed: ${sym}`);
-      }
-    }
-
-    // Load/update each strategy
-    for (const strategy of strategies) {
-      const isNew = !prevSymbols.has(strategy.symbol);
-
-      // Calculate levels from cached metrics
-      const cache = await prisma.symbolCache.findUnique({
-        where: { symbol: strategy.symbol },
+    try {
+      const strategies = await prisma.strategy.findMany({
+        where: { autoExecute: true },
       });
 
-      if (!cache) {
-        console.warn(`[Engine] No cached metrics for ${strategy.symbol}, skipping`);
-        continue;
-      }
+      const currentSymbols = new Set(strategies.map((s) => s.symbol));
+      const prevSymbols = new Set(this.strategies.keys());
 
-      const levels = this.calculateLevels(strategy, cache.sma200, cache.dailyVolatility);
-      const trades = await prisma.trade.findMany({
-        where: { strategyId: strategy.id },
-      });
-
-      this.strategies.set(strategy.symbol, {
-        strategy,
-        levels,
-        trades,
-        sma200: cache.sma200,
-        dailyVolatility: cache.dailyVolatility,
-      });
-
-      if (isNew) {
-        if (!this.simulate) {
-          this.ibkr.subscribeMarketData(strategy.symbol);
-        }
-        console.log(`[Engine] Added: ${strategy.symbol} (${levels.length} levels)`);
-        for (const l of levels) {
-          console.log(`  Step ${l.step}: buy ≤ $${l.buyPrice.toFixed(2)}, sell ≥ $${l.sellPrice.toFixed(2)}, ~${Math.round(l.shares)} shares`);
+      // Unsubscribe removed symbols
+      for (const sym of prevSymbols) {
+        if (!currentSymbols.has(sym)) {
+          if (!this.simulate) {
+            this.ibkr.unsubscribeMarketData(sym);
+          }
+          this.strategies.delete(sym);
+          console.log(`[Engine] Removed: ${sym}`);
         }
       }
-    }
 
-    // Reload active orders from DB
-    const dbOrders = await prisma.order.findMany({
-      where: { status: { in: ['pending', 'submitted'] } },
-    });
-    this.activeOrders.clear();
-    for (const o of dbOrders) {
-      this.activeOrders.set(o.id, o);
-      const sym = strategies.find((s) => s.id === o.strategyId)?.symbol;
-      if (sym) this.lockedTickers.add(sym);
+      // Load/update each strategy
+      for (const strategy of strategies) {
+        const isNew = !prevSymbols.has(strategy.symbol);
+
+        // Calculate levels from cached metrics
+        const cache = await prisma.symbolCache.findUnique({
+          where: { symbol: strategy.symbol },
+        });
+
+        if (!cache) {
+          console.warn(`[Engine] No cached metrics for ${strategy.symbol}, skipping`);
+          continue;
+        }
+
+        const levels = this.calculateLevels(strategy, cache.sma200, cache.dailyVolatility);
+        const trades = await prisma.trade.findMany({
+          where: { strategyId: strategy.id },
+        });
+
+        this.strategies.set(strategy.symbol, {
+          strategy,
+          levels,
+          trades,
+          sma200: cache.sma200,
+          dailyVolatility: cache.dailyVolatility,
+        });
+
+        if (isNew) {
+          if (!this.simulate) {
+            this.ibkr.subscribeMarketData(strategy.symbol);
+          }
+          console.log(`[Engine] Added: ${strategy.symbol} (${levels.length} levels)`);
+          for (const l of levels) {
+            console.log(`  Step ${l.step}: buy ≤ $${l.buyPrice.toFixed(2)}, sell ≥ $${l.sellPrice.toFixed(2)}, ~${Math.round(l.shares)} shares`);
+          }
+        }
+      }
+
+      // Reload active orders from DB
+      const dbOrders = await prisma.order.findMany({
+        where: { status: { in: ['pending', 'submitted'] } },
+      });
+      this.activeOrders.clear();
+      for (const o of dbOrders) {
+        this.activeOrders.set(o.id, o);
+        const sym = strategies.find((s) => s.id === o.strategyId)?.symbol;
+        if (sym) this.lockedTickers.add(sym);
+      }
+    } catch (err) {
+      console.error('[Engine] Failed to load strategies (will retry next cycle):', (err as Error).message);
     }
   }
 
@@ -185,26 +208,14 @@ export class TradingEngine {
     sma200: number,
     dailyVolatility: number,
   ): StepLevel[] {
-    const j = strategy.initialParamJ;
-    const k = strategy.stepParamK;
-    const levels: StepLevel[] = [];
-
-    for (let i = 0; i < strategy.maxSteps; i++) {
-      const stepNum = i + 1;
-      const buyPrice = sma200 * (1 - (j + i * k) * dailyVolatility);
-      const sellPrice = sma200 * (1 - (j + (i - 1) * k) * dailyVolatility);
-      const shares = strategy.stepAmount / buyPrice;
-
-      levels.push({ step: stepNum, buyPrice, sellPrice, shares });
-    }
-
-    return levels;
+    return calculateLevels(strategy, sma200, dailyVolatility);
   }
 
   // ── Price Handling ──
 
   private async handleTick(tick: MarketTick) {
     if (!this.running) return;
+    if (!this.simulate && !isMarketOpen()) return;
 
     const symbol = tick.symbol;
 
@@ -216,35 +227,47 @@ export class TradingEngine {
     const state = this.strategies.get(symbol);
     if (!state) return;
 
-    const lines: string[] = [];
-    lines.push(`[Tick] ${symbol} bid=$${tick.bid.toFixed(2)} ask=$${tick.ask.toFixed(2)} | SMA200=$${state.sma200.toFixed(2)} σ=${(state.dailyVolatility * 100).toFixed(2)}%`);
+    // Build open positions from trades with no sell
+    const openPositions = state.trades
+      .filter((t) => t.sellPrice == null)
+      .map((t) => ({ step: t.step, shares: t.shares, buyPrice: t.buyPrice }));
 
-    let action: { step: number; side: 'BUY' | 'SELL'; price: number; qty: number } | null = null;
+    // Evaluate using pure logic
+    const action = evaluateTick(tick.bid, tick.ask, state.levels, openPositions);
 
-    for (const level of state.levels) {
-      const openTrade = state.trades.find(
-        (t) => t.step === level.step && t.sellPrice == null,
-      );
+    // Log detailed evaluation (throttled to once per minute per symbol, always log on trigger)
+    const now = Date.now();
+    const lastLog = this.lastLogTime.get(symbol) ?? 0;
+    const shouldLog = action || (now - lastLog >= this.LOG_INTERVAL_MS);
 
-      if (openTrade) {
-        const sellHit = tick.bid >= level.sellPrice;
-        lines.push(`  Step ${level.step}: SELL target=$${level.sellPrice.toFixed(2)} bid=$${tick.bid.toFixed(2)} ${sellHit ? '→ TRIGGERED' : `gap=$${(level.sellPrice - tick.bid).toFixed(2)}`} (holding ${openTrade.shares} shares @ $${openTrade.buyPrice.toFixed(2)})`);
-        if (sellHit && !action) {
-          action = { step: level.step, side: 'SELL', price: level.sellPrice, qty: openTrade.shares };
-        }
-      } else {
-        const buyHit = tick.ask <= level.buyPrice;
-        lines.push(`  Step ${level.step}: BUY  target=$${level.buyPrice.toFixed(2)} ask=$${tick.ask.toFixed(2)} ${buyHit ? '→ TRIGGERED' : `gap=$${(tick.ask - level.buyPrice).toFixed(2)}`}`);
-        if (buyHit && !action) {
-          action = { step: level.step, side: 'BUY', price: level.buyPrice, qty: level.shares };
+    if (shouldLog) {
+      this.lastLogTime.set(symbol, now);
+      const lines: string[] = [];
+      lines.push(`[Tick] ${symbol} bid=$${tick.bid.toFixed(2)} ask=$${tick.ask.toFixed(2)} | SMA200=$${state.sma200.toFixed(2)} σ=${(state.dailyVolatility * 100).toFixed(2)}%`);
+
+      for (const level of state.levels) {
+        const openPos = openPositions.find((p) => p.step === level.step);
+
+        if (openPos) {
+          const sellHit = tick.bid >= level.sellPrice;
+          const pctToSell = ((level.sellPrice - tick.bid) / tick.bid * 100).toFixed(2);
+          lines.push(`  Step ${level.step}: SELL target=$${level.sellPrice.toFixed(2)} bid=$${tick.bid.toFixed(2)} ${sellHit ? '→ TRIGGERED' : `bid needs +${pctToSell}%`} (holding ${openPos.shares} shares @ $${openPos.buyPrice.toFixed(2)})`);
+        } else {
+          const buyHit = tick.ask <= level.buyPrice;
+          const pctToBuy = ((level.buyPrice - tick.ask) / tick.ask * 100).toFixed(2);
+          lines.push(`  Step ${level.step}: BUY  target=$${level.buyPrice.toFixed(2)} ask=$${tick.ask.toFixed(2)} ${buyHit ? '→ TRIGGERED' : `ask needs ${pctToBuy}%`}`);
         }
       }
+
+      console.log(lines.join('\n'));
     }
 
-    console.log(lines.join('\n'));
-
     if (action) {
-      await this.placeOrder(state, action.step, action.side, action.price, action.qty);
+      try {
+        await this.placeOrder(state, action.step, action.side, action.price, action.qty);
+      } catch (err) {
+        console.error(`[Engine] Failed to place order for ${symbol}:`, (err as Error).message);
+      }
     }
   }
 
@@ -258,7 +281,7 @@ export class TradingEngine {
     quantity: number,
   ) {
     const symbol = state.strategy.symbol;
-    const roundedQty = Math.round(quantity); // whole shares only
+    const roundedQty = roundShares(quantity);
     if (roundedQty <= 0) return;
 
     const roundedPrice = Math.round(targetPrice * 100) / 100;
@@ -303,26 +326,30 @@ export class TradingEngine {
 
     if (!isFilled && !isCancelled) return; // ignore intermediate statuses
 
-    const newStatus = isFilled ? 'filled' : 'cancelled';
+    try {
+      const newStatus = isFilled ? 'filled' : 'cancelled';
 
-    // Update DB
-    const updated = await prisma.order.update({
-      where: { id: dbOrder.id },
-      data: {
-        status: newStatus,
-        filledQty: fill.filled,
-        avgFillPrice: fill.avgFillPrice > 0 ? fill.avgFillPrice : undefined,
-        filledAt: isFilled ? new Date() : undefined,
-        cancelledAt: isCancelled ? new Date() : undefined,
-      },
-    });
-    this.activeOrders.set(dbOrder.id, updated);
+      // Update DB
+      const updated = await prisma.order.update({
+        where: { id: dbOrder.id },
+        data: {
+          status: newStatus,
+          filledQty: fill.filled,
+          avgFillPrice: fill.avgFillPrice > 0 ? fill.avgFillPrice : undefined,
+          filledAt: isFilled ? new Date() : undefined,
+          cancelledAt: isCancelled ? new Date() : undefined,
+        },
+      });
+      this.activeOrders.set(dbOrder.id, updated);
 
-    if (isFilled && fill.filled > 0) {
-      await this.recordTrade(updated);
+      if (isFilled && fill.filled > 0) {
+        await this.recordTrade(updated);
+      }
+
+      await this.unlockTicker(updated.strategyId);
+    } catch (err) {
+      console.error(`[Engine] Failed to process order status for IBKR #${fill.ibkrOrderId}:`, (err as Error).message);
     }
-
-    await this.unlockTicker(updated.strategyId);
   }
 
   private async recordTrade(order: Order) {
@@ -343,7 +370,7 @@ export class TradingEngine {
         },
       });
       console.log(
-        `[Engine] BUY filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)}`,
+        `[Engine] BUY filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)} (target $${order.limitPrice.toFixed(2)}, slippage ${((fillPrice - order.limitPrice) / order.limitPrice * 100).toFixed(2)}%)`,
       );
       if (state) state.trades.push(trade);
     } else {
@@ -357,7 +384,7 @@ export class TradingEngine {
           data: { sellPrice: fillPrice, sellDate: todayStr() },
         });
         console.log(
-          `[Engine] SELL filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)}`,
+          `[Engine] SELL filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)} (target $${order.limitPrice.toFixed(2)}, slippage ${((fillPrice - order.limitPrice) / order.limitPrice * 100).toFixed(2)}%)`,
         );
         if (state) {
           const idx = state.trades.findIndex((t) => t.id === openTrade.id);

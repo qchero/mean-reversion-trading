@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "trade": "tsx src/trading/run.ts",
-    "trade:sim": "tsx src/trading/run.ts --simulate"
+    "trade:sim": "tsx src/trading/run.ts --simulate",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@mantine/core": "^8.3.16",
@@ -39,6 +41,7 @@
     "postcss": "^8.5.8",
     "tailwindcss": "^3.4.19",
     "ts-node": "^10.9.2",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.0"
   }
 }

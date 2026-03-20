@@ -77,20 +77,11 @@ export class IBKRClient {
     });
 
     this.ib.on(EventName.error, (err: Error, code: number, reqId: number) => {
-      // Code 2104/2106/2158 are info messages, not errors
+      // Informational messages — not errors
       if (code === 2104 || code === 2106 || code === 2158) return;
-      console.error(`[IBKR] Error ${code} (reqId=${reqId}):`, err.message);
-
-      // If reqId matches a placed order, treat as rejection
-      if (reqId >= 0 && this.onOrderStatus) {
-        this.onOrderStatus({
-          ibkrOrderId: reqId,
-          status: 'Cancelled',
-          filled: 0,
-          remaining: 0,
-          avgFillPrice: 0,
-        });
-      }
+      // All other errors/warnings: just log. Order lifecycle is handled
+      // entirely by the orderStatus callback (Filled, Cancelled, Inactive).
+      console.warn(`[IBKR] Error ${code} (reqId=${reqId}):`, err.message);
     });
 
     // Order status updates
@@ -212,6 +203,7 @@ export class IBKRClient {
       action: action === 'BUY' ? OrderAction.BUY : OrderAction.SELL,
       orderType: OrderType.MKT,
       totalQuantity: quantity,
+      tif: TimeInForce.DAY,
       transmit: true,
     };
 
