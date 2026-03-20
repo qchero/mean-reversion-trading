@@ -29,6 +29,14 @@ function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function timestamp(): string {
+  return new Date().toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  });
+}
+
 /** Check if current time is within US regular trading hours (9:30am–4:00pm ET) on a weekday. */
 function isMarketOpen(): boolean {
   const now = new Date();
@@ -243,7 +251,7 @@ export class TradingEngine {
     if (shouldLog) {
       this.lastLogTime.set(symbol, now);
       const lines: string[] = [];
-      lines.push(`[Tick] ${symbol} bid=$${tick.bid.toFixed(2)} ask=$${tick.ask.toFixed(2)} | SMA200=$${state.sma200.toFixed(2)} σ=${(state.dailyVolatility * 100).toFixed(2)}%`);
+      lines.push(`[${timestamp()}] [Tick] ${symbol} bid=$${tick.bid.toFixed(2)} ask=$${tick.ask.toFixed(2)} | SMA200=$${state.sma200.toFixed(2)} σ=${(state.dailyVolatility * 100).toFixed(2)}%`);
 
       for (const level of state.levels) {
         const openPos = openPositions.find((p) => p.step === level.step);
@@ -306,7 +314,7 @@ export class TradingEngine {
     this.lockedTickers.add(symbol);
 
     console.log(
-      `[Engine] ${side} MKT order: ${symbol} step ${step} | ${roundedQty} shares (trigger $${roundedPrice})`,
+      `[${timestamp()}] [Engine] ${side} MKT order: ${symbol} step ${step} | ${roundedQty} shares (trigger $${roundedPrice})`,
     );
   }
 
@@ -370,7 +378,7 @@ export class TradingEngine {
         },
       });
       console.log(
-        `[Engine] BUY filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)} (target $${order.limitPrice.toFixed(2)}, slippage ${((fillPrice - order.limitPrice) / order.limitPrice * 100).toFixed(2)}%)`,
+        `[${timestamp()}] [Engine] BUY filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)} (target $${order.limitPrice.toFixed(2)}, slippage ${((fillPrice - order.limitPrice) / order.limitPrice * 100).toFixed(2)}%)`,
       );
       if (state) state.trades.push(trade);
     } else {
@@ -384,7 +392,7 @@ export class TradingEngine {
           data: { sellPrice: fillPrice, sellDate: todayStr() },
         });
         console.log(
-          `[Engine] SELL filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)} (target $${order.limitPrice.toFixed(2)}, slippage ${((fillPrice - order.limitPrice) / order.limitPrice * 100).toFixed(2)}%)`,
+          `[${timestamp()}] [Engine] SELL filled: ${strategy.symbol} step ${order.step} | ${order.filledQty} shares @ $${fillPrice.toFixed(2)} (target $${order.limitPrice.toFixed(2)}, slippage ${((fillPrice - order.limitPrice) / order.limitPrice * 100).toFixed(2)}%)`,
         );
         if (state) {
           const idx = state.trades.findIndex((t) => t.id === openTrade.id);
