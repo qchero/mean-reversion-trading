@@ -34,13 +34,15 @@ export default function Home() {
     setMetricsMap(metricsResult);
     setTradesMap(tradesResult);
 
-    // Sort by latestPrice / sma200 ASC (lowest ratio = furthest below SMA = most triggered)
+    // Sort by σ-normalized deviation ASC (most negative σ = furthest below SMA = most triggered)
     const sorted = [...data].sort((a, b) => {
       const mA = metricsResult[a.symbol];
       const mB = metricsResult[b.symbol];
-      const ratioA = mA && mA.sma200 > 0 ? mA.latestPrice / mA.sma200 : 1;
-      const ratioB = mB && mB.sma200 > 0 ? mB.latestPrice / mB.sma200 : 1;
-      return ratioA - ratioB;
+      const sigmaA = mA && mA.sma200 > 0 && mA.dailyVolatility > 0
+        ? (mA.latestPrice / mA.sma200 - 1) / mA.dailyVolatility : 0;
+      const sigmaB = mB && mB.sma200 > 0 && mB.dailyVolatility > 0
+        ? (mB.latestPrice / mB.sma200 - 1) / mB.dailyVolatility : 0;
+      return sigmaA - sigmaB;
     });
 
     setStrategies(sorted);

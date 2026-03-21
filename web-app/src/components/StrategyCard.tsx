@@ -2,9 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import {
-  Paper, Title, Text, Group, Grid, Switch, Badge, Table,
+  Paper, Title, Text, Group, Grid, Switch, Badge, Table, Box,
   ActionIcon, NumberInput, Button, Collapse, UnstyledButton, Skeleton, Modal,
-  TextInput, Divider,
+  TextInput, Divider, Tooltip,
 } from '@mantine/core';
 import { IconTrash, IconChevronDown, IconChevronUp, IconEdit, IconCurrencyDollar } from '@tabler/icons-react';
 import {
@@ -195,8 +195,9 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       const isBought = !!openTrade;
 
       const buyPrice = openTrade ? openTrade.buyPrice : theoBuyPrice;
-      const shares = openTrade ? openTrade.shares : (_amount / theoBuyPrice);
-      const costBasis = openTrade ? (openTrade.buyPrice * openTrade.shares) : _amount;
+      const rawShares = openTrade ? openTrade.shares : (_amount / theoBuyPrice);
+      const shares = openTrade ? rawShares : Math.round(rawShares);
+      const costBasis = openTrade ? (openTrade.buyPrice * openTrade.shares) : (shares * theoBuyPrice);
 
       const estProfit = shares * (theoSellPrice - buyPrice);
       const estProfitPct = (estProfit / costBasis) * 100;
@@ -210,7 +211,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
         step: stepNum,
         buyPrice: buyPrice.toFixed(2),
         sellPrice: theoSellPrice.toFixed(2),
-        shares: shares.toFixed(4),
+        shares: openTrade ? shares.toFixed(2) : String(shares),
         amount: costBasis.toFixed(2),
         estProfit: estProfit.toFixed(2),
         estProfitPct: estProfitPct.toFixed(2),
@@ -224,9 +225,9 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
   };
 
   const steps = generatePreviewSteps();
-  const triggeredCount = steps.filter(s => s.triggered).length;
-  const boughtCount = steps.filter(s => s.isBought).length;
   const ratio = metrics && metrics.sma200 > 0 ? metrics.latestPrice / metrics.sma200 : null;
+  const currentSigma = ratio !== null && metrics && metrics.dailyVolatility > 0
+    ? (ratio - 1) / metrics.dailyVolatility : null;
 
   const jError =
     metrics && metrics.dailyVolatility > 0 && Number(j) * metrics.dailyVolatility >= 1
@@ -272,12 +273,12 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       {/* Metrics summary — always visible */}
       {metrics && (
         <>
-          <Grid mt="sm" align="center">
-            <Grid.Col span={3}>
+          <Group mt="sm" gap="xl">
+            <div>
               <Text size="xs" c="dimmed">SMA 200</Text>
               <Text fw={600}>${metrics.sma200.toFixed(2)}</Text>
-            </Grid.Col>
-            <Grid.Col span={3}>
+            </div>
+            <div>
               <Text size="xs" c="dimmed">Latest Price</Text>
               <Text fw={600} c={metrics.latestPrice < metrics.sma200 ? 'red' : 'teal'}>
                 ${metrics.latestPrice.toFixed(2)}
@@ -287,25 +288,112 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   </Text>
                 )}
               </Text>
-            </Grid.Col>
-            <Grid.Col span={3}>
-              <Text size="xs" c="dimmed">Daily Volatility (σ)</Text>
+            </div>
+            <div>
+              <Text size="xs" c="dimmed">σ</Text>
               <Text fw={600}>{(metrics.dailyVolatility * 100).toFixed(2)}%</Text>
-            </Grid.Col>
-            <Grid.Col span={1.5}>
-              <Text size="xs" c="dimmed">Reached</Text>
-              <Text fw={600} c={triggeredCount > 0 ? 'orange' : 'dimmed'}>
-                {triggeredCount} / {maxSteps}
-              </Text>
-            </Grid.Col>
-            <Grid.Col span={1.5}>
-              <Text size="xs" c="dimmed">Bought</Text>
-              <Text fw={600} c={boughtCount > 0 ? 'blue' : 'dimmed'}>
-                {boughtCount} / {maxSteps}
-              </Text>
-            </Grid.Col>
-          </Grid>
-          <Text size="xs" c="dimmed" mt={4}>Data as of {metrics.lastDate}</Text>
+            </div>
+            <Text size="xs" c="dimmed" style={{ marginLeft: 'auto' }}>{metrics.lastDate}</Text>
+          </Group>
+
+          {/* σ Gauge — left is positive (high price), right is negative (low price / buy zone) */}
+          {currentSigma !== null && steps.length > 0 && (() => {
+            const _j = Number(j);
+            const _k = Number(k);
+            const _max = Number(maxSteps);
+            // Step buy σ values (negative): step i has σ = -(j + i*k)
+            const stepSigmas = Array.from({ length: _max }, (_, i) => -(_j + i * _k));
+            // Step sell σ values (negative, less negative than buy): step i sell σ = -(j + (i-1)*k)
+            const sellSigmas = Array.from({ length: _max }, (_, i) => -(_j + (i - 1) * _k));
+            // Left edge: include sell targets for bought steps
+            const boughtSellSigmas = sellSigmas.filter((_, i) => steps[i]?.isBought);
+            const allPoints = [currentSigma, stepSigmas[0], ...boughtSellSigmas];
+            const leftSigma = Math.max(...allPoints) + 1;
+            // Right edge: max of current σ and last step σ, plus padding
+            const rightSigma = Math.min(currentSigma, stepSigmas[stepSigmas.length - 1]) - 1;
+            const range = leftSigma - rightSigma; // leftSigma > rightSigma (positive to negative)
+            // Map σ value to % position (left=0%, right=100%)
+            const toPercent = (sigma: number) =>
+              Math.max(0, Math.min(100, ((leftSigma - sigma) / range) * 100));
+            const currentPos = toPercent(currentSigma);
+
+            return (
+              <Box mt="sm" px="md" pb="xs">
+                <Box style={{ position: 'relative', height: 40 }}>
+                  {/* Track */}
+                  <Box style={{
+                    position: 'absolute', top: 16, left: 0, right: 0, height: 4,
+                    backgroundColor: 'var(--mantine-color-dark-5)', borderRadius: 2,
+                  }} />
+
+                  {/* 0σ separator line */}
+                  {currentSigma > 0 && (
+                    <Box style={{
+                      position: 'absolute', top: 12, left: `${toPercent(0)}%`, transform: 'translateX(-50%)',
+                    }}>
+                      <Box style={{ width: 2, height: 12, backgroundColor: 'var(--mantine-color-dark-3)' }} />
+                      <Text size="9px" c="dimmed" ta="center" mt={2}>0σ</Text>
+                    </Box>
+                  )}
+
+                  {/* Step markers */}
+                  {stepSigmas.map((sigma, i) => {
+                    const isBought = steps[i]?.isBought;
+                    const pos = toPercent(sigma);
+                    return (
+                      <Tooltip key={i} label={`Step ${i + 1}: ${sigma.toFixed(1)}σ ($${steps[i]?.buyPrice})`} withArrow>
+                        <Box style={{
+                          position: 'absolute', top: 11, left: `${pos}%`, transform: 'translateX(-50%)',
+                          cursor: 'default',
+                        }}>
+                          <Box style={{
+                            width: 14, height: 14, borderRadius: '50%',
+                            border: `2px solid ${isBought ? 'var(--mantine-color-blue-6)' : 'var(--mantine-color-dark-3)'}`,
+                            backgroundColor: isBought ? 'var(--mantine-color-blue-6)' : 'transparent',
+                          }} />
+                          <Text size="9px" c="dimmed" ta="center" mt={2}>{sigma.toFixed(1)}σ</Text>
+                        </Box>
+                      </Tooltip>
+                    );
+                  })}
+
+                  {/* Sell target marker (diamond, only for step 1 when bought) */}
+                  {sellSigmas.map((sigma, i) => {
+                    if (i !== 0 || !steps[i]?.isBought || currentSigma <= stepSigmas[0]) return null;
+                    const pos = toPercent(sigma);
+                    return (
+                      <Tooltip key={`sell-${i}`} label={`Step ${i + 1} sell: ${sigma.toFixed(1)}σ ($${steps[i]?.sellPrice})`} withArrow>
+                        <Box style={{
+                          position: 'absolute', top: 12, left: `${pos}%`, transform: 'translateX(-50%)',
+                          cursor: 'default',
+                        }}>
+                          <Box style={{ width: 2, height: 12, backgroundColor: 'var(--mantine-color-teal-6)' }} />
+                          <Text size="9px" c="teal" ta="center" mt={2}>{sigma.toFixed(1)}σ</Text>
+                        </Box>
+                      </Tooltip>
+                    );
+                  })}
+
+                  {/* Current price marker (triangle + σ label) */}
+                  <Tooltip label={`Current: ${currentSigma.toFixed(1)}σ ($${metrics.latestPrice.toFixed(2)})`} withArrow>
+                    <Box style={{
+                      position: 'absolute', top: 11, left: `${currentPos}%`, transform: 'translateX(-50%)',
+                      cursor: 'default',
+                    }}>
+                      <Box style={{
+                        width: 0, height: 0, margin: '0 auto',
+                        borderLeft: '7px solid transparent', borderRight: '7px solid transparent',
+                        borderTop: '14px solid var(--mantine-color-orange-5)',
+                      }} />
+                      <Text size="9px" fw={600} c="orange" ta="center" mt={2}>
+                        {currentSigma.toFixed(1)}σ
+                      </Text>
+                    </Box>
+                  </Tooltip>
+                </Box>
+              </Box>
+            );
+          })()}
         </>
       )}
 
@@ -313,11 +401,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       <Collapse in={expanded}>
         {metrics ? (
           <>
-            <Title order={6} mt="md" mb="sm" c="dimmed">Live Parameters</Title>
-            {autoExecute && (
-              <Text size="xs" c="orange" mb="sm">⚠ Parameters are locked while Auto Execute is active.</Text>
-            )}
-            <Grid mb="xl">
+            <Grid mt="md" mb="xl">
               <Grid.Col span={3}>
                 <NumberInput
                   label="Initial Multiplier"
@@ -370,7 +454,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   <Table.Th>Buy Limit</Table.Th>
                   <Table.Th>Take Profit</Table.Th>
                   <Table.Th>Est. Shares</Table.Th>
-                  <Table.Th>Allocated</Table.Th>
+                  <Table.Th visibleFrom="sm">Allocated</Table.Th>
                   <Table.Th>Est. Profit</Table.Th>
                   <Table.Th></Table.Th>
                 </Table.Tr>
@@ -387,22 +471,21 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                         {row.activeOrder ? (
                           <Badge size="xs" color="yellow" variant="filled">
                             {row.activeOrder.side === 'BUY' ? 'buying' : 'selling'}
-                            {row.activeOrder.filledQty > 0 && ` ${row.activeOrder.filledQty}/${row.activeOrder.totalQty}`}
                           </Badge>
                         ) : row.isBought ? (
-                          <Badge size="xs" color="blue" variant="filled">bought</Badge>
+                          <Badge size="xs" color="blue" variant="filled">held</Badge>
                         ) : row.triggered ? (
-                          <Badge size="xs" color="green" variant="filled">triggered</Badge>
+                          <Badge size="xs" color="green" variant="filled">hit</Badge>
                         ) : null}
                       </Group>
                     </Table.Td>
                     <Table.Td c={row.isBought ? "blue" : "green"} fw={500}>${row.buyPrice}</Table.Td>
                     <Table.Td c="blue" fw={500}>${row.sellPrice}</Table.Td>
                     <Table.Td>{row.shares}</Table.Td>
-                    <Table.Td>${row.amount}</Table.Td>
+                    <Table.Td visibleFrom="sm">${row.amount}</Table.Td>
                     <Table.Td c="teal" fw={500}>
                       ${row.estProfit}
-                      <Text span size="xs" c="dimmed" ml={4}>({row.estProfitPct}%)</Text>
+                      <Text span size="xs" c="dimmed" ml={4} visibleFrom="sm">({row.estProfitPct}%)</Text>
                     </Table.Td>
                     <Table.Td>
                       {!autoExecute && (
