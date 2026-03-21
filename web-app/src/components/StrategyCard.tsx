@@ -245,24 +245,32 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       : undefined;
 
   return (
-    <Paper shadow="sm" radius="md" p="xl" className="glass-card" mb="lg">
+    <Paper shadow="sm" radius="md" p={{ base: 'sm', sm: 'xl' }} className="glass-card" mb="lg" style={{ overflow: 'hidden' }}>
       {/* Header row — always visible */}
-      <Group justify="space-between">
-        <UnstyledButton onClick={() => setExpanded(v => !v)} style={{ flex: 1 }}>
-          <Group>
+      <Group justify="space-between" wrap="nowrap">
+        <UnstyledButton onClick={() => setExpanded(v => !v)} style={{ flex: 1, minWidth: 0 }}>
+          <Group gap="xs" wrap="nowrap">
             <Title order={3}>{strategy.symbol}</Title>
-            <Badge color={autoExecute ? 'green' : 'gray'}>
-              {autoExecute ? 'Auto Active' : 'Manual'}
+            <Badge color={autoExecute ? 'green' : 'gray'} size="sm">
+              {autoExecute ? 'Auto' : 'Manual'}
             </Badge>
             {expanded ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
           </Group>
         </UnstyledButton>
-        <Group>
+        <Group gap="xs" wrap="nowrap">
           <Switch
             label="Auto Execute"
             checked={autoExecute}
             onChange={toggleAutoExecute}
             color="teal"
+            styles={{ label: { paddingLeft: 6 } }}
+            visibleFrom="sm"
+          />
+          <Switch
+            checked={autoExecute}
+            onChange={toggleAutoExecute}
+            color="teal"
+            hiddenFrom="sm"
           />
           <ActionIcon color="red" variant="subtle" onClick={() => setDeleteConfirm(true)}>
             <IconTrash size={18} />
@@ -273,7 +281,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       {/* Metrics summary — always visible */}
       {metrics && (
         <>
-          <Group mt="sm" gap="xl">
+          <Group mt="sm" justify="space-between" wrap="nowrap">
             <div>
               <Text size="xs" c="dimmed">SMA 200</Text>
               <Text fw={600}>${metrics.sma200.toFixed(2)}</Text>
@@ -290,10 +298,10 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
               </Text>
             </div>
             <div>
-              <Text size="xs" c="dimmed">σ</Text>
+              <Text size="xs" c="dimmed" visibleFrom="sm">Daily Volatility (σ)</Text>
+              <Text size="xs" c="dimmed" hiddenFrom="sm">σ</Text>
               <Text fw={600}>{(metrics.dailyVolatility * 100).toFixed(2)}%</Text>
             </div>
-            <Text size="xs" c="dimmed" style={{ marginLeft: 'auto' }}>{metrics.lastDate}</Text>
           </Group>
 
           {/* σ Gauge — left is positive (high price), right is negative (low price / buy zone) */}
@@ -402,9 +410,9 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
         {metrics ? (
           <>
             <Grid mt="md" mb="xl">
-              <Grid.Col span={3}>
+              <Grid.Col span={{ base: 6, sm: 3 }}>
                 <NumberInput
-                  label="Initial Multiplier"
+                  label="Initial Mult."
                   value={j}
                   onChange={setJ}
                   min={0.01}
@@ -413,9 +421,9 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   error={jError}
                 />
               </Grid.Col>
-              <Grid.Col span={3}>
+              <Grid.Col span={{ base: 6, sm: 3 }}>
                 <NumberInput
-                  label="Step Drop Multiplier"
+                  label="Step Drop Mult."
                   value={k}
                   onChange={setK}
                   min={0.01}
@@ -424,7 +432,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   error={lastStepError}
                 />
               </Grid.Col>
-              <Grid.Col span={3}>
+              <Grid.Col span={{ base: 6, sm: 3 }}>
                 <NumberInput
                   label="Max Steps"
                   value={maxSteps}
@@ -434,7 +442,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   error={lastStepError ? 'Reduce steps or k' : undefined}
                 />
               </Grid.Col>
-              <Grid.Col span={3}>
+              <Grid.Col span={{ base: 6, sm: 3 }}>
                 <NumberInput
                   label="Amount ($)"
                   value={amount}
@@ -447,15 +455,15 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
             </Grid>
 
             <Title order={5} mb="sm">Preview Steps</Title>
-            <Table striped highlightOnHover>
+            <Table striped highlightOnHover fz={{ base: 'xs', sm: 'sm' }}>
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th>Step</Table.Th>
-                  <Table.Th>Buy Limit</Table.Th>
-                  <Table.Th>Take Profit</Table.Th>
-                  <Table.Th>Est. Shares</Table.Th>
+                  <Table.Th>Buy</Table.Th>
+                  <Table.Th>Sell</Table.Th>
+                  <Table.Th>Shares</Table.Th>
                   <Table.Th visibleFrom="sm">Allocated</Table.Th>
-                  <Table.Th>Est. Profit</Table.Th>
+                  <Table.Th>Profit</Table.Th>
                   <Table.Th></Table.Th>
                 </Table.Tr>
               </Table.Thead>
@@ -466,17 +474,19 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                     bg={row.isBought ? 'var(--mantine-color-blue-light)' : row.triggered ? 'var(--mantine-color-green-light)' : undefined}
                   >
                     <Table.Td>
-                      <Group gap={6}>
+                      <Group gap={6} wrap="nowrap">
                         {row.step}
-                        {row.activeOrder ? (
-                          <Badge size="xs" color="yellow" variant="filled">
-                            {row.activeOrder.side === 'BUY' ? 'buying' : 'selling'}
-                          </Badge>
-                        ) : row.isBought ? (
-                          <Badge size="xs" color="blue" variant="filled">held</Badge>
-                        ) : row.triggered ? (
-                          <Badge size="xs" color="green" variant="filled">hit</Badge>
-                        ) : null}
+                        <Box visibleFrom="sm">
+                          {row.activeOrder ? (
+                            <Badge size="xs" color="yellow" variant="filled">
+                              {row.activeOrder.side === 'BUY' ? 'buying' : 'selling'}
+                            </Badge>
+                          ) : row.isBought ? (
+                            <Badge size="xs" color="blue" variant="filled">held</Badge>
+                          ) : row.triggered ? (
+                            <Badge size="xs" color="green" variant="filled">hit</Badge>
+                          ) : null}
+                        </Box>
                       </Group>
                     </Table.Td>
                     <Table.Td c={row.isBought ? "blue" : "green"} fw={500}>${row.buyPrice}</Table.Td>
@@ -488,25 +498,23 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                       <Text span size="xs" c="dimmed" ml={4} visibleFrom="sm">({row.estProfitPct}%)</Text>
                     </Table.Td>
                     <Table.Td>
-                      {!autoExecute && (
-                        row.isBought && row.openTrade ? (
-                          <ActionIcon variant="subtle" color="teal" onClick={() => setSellModal({
-                            trade: row.openTrade!,
-                            price: row.sellPrice,
-                            date: todayStr(),
-                          })}>
-                            <IconCurrencyDollar size={16} />
-                          </ActionIcon>
-                        ) : (
-                          <ActionIcon variant="subtle" color="gray" onClick={() => setBuyModal({
-                            step: row.step,
-                            shares: row.shares,
-                            price: row.buyPrice,
-                            date: todayStr(),
-                          })}>
-                            <IconEdit size={16} />
-                          </ActionIcon>
-                        )
+                      {row.isBought && row.openTrade ? (
+                        <ActionIcon variant="subtle" color="teal" onClick={() => setSellModal({
+                          trade: row.openTrade!,
+                          price: row.sellPrice,
+                          date: todayStr(),
+                        })} style={{ visibility: autoExecute ? 'hidden' : 'visible' }}>
+                          <IconCurrencyDollar size={16} />
+                        </ActionIcon>
+                      ) : (
+                        <ActionIcon variant="subtle" color="gray" onClick={() => setBuyModal({
+                          step: row.step,
+                          shares: row.shares,
+                          price: row.buyPrice,
+                          date: todayStr(),
+                        })} style={{ visibility: autoExecute ? 'hidden' : 'visible' }}>
+                          <IconEdit size={16} />
+                        </ActionIcon>
                       )}
                     </Table.Td>
                   </Table.Tr>
@@ -654,11 +662,6 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
               </>
             )}
 
-            {!autoExecute && (
-              <Button mt="lg" fullWidth color="teal" variant="light" onClick={() => alert('Execute simulated!')}>
-                Execute Now
-              </Button>
-            )}
           </>
         ) : (
           <Grid mt="md" gutter="xs">

@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Container, Title, Text, Grid } from '@mantine/core';
+import { ActionIcon, Box, Container, Drawer, Group, Loader, Title, Text, Grid } from '@mantine/core';
+import { useDisclosure, useMediaQuery } from '@mantine/hooks';
+import { IconLogout, IconPlus } from '@tabler/icons-react';
+import { signOut } from 'next-auth/react';
 import { notifications } from '@mantine/notifications';
 import StrategyForm from '@/components/StrategyForm';
 import StrategyCard from '@/components/StrategyCard';
@@ -19,10 +22,14 @@ export default function Home() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [metricsMap, setMetricsMap] = useState<Record<string, StrategyMetrics>>({});
   const [tradesMap, setTradesMap] = useState<Record<string, Trade[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [drawerOpened, { open: openDrawer, close: closeDrawer }] = useDisclosure(false);
+  const isMobile = useMediaQuery('(max-width: 768px)');
   const notifiedOrderIds = useRef(new Set<string>());
   const lastPollTime = useRef(Date.now());
 
   const loadStrategies = async () => {
+    try {
     const data = await getStrategies();
 
     // Batch fetch metrics and trades in parallel
@@ -46,6 +53,9 @@ export default function Home() {
     });
 
     setStrategies(sorted);
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Poll for order events and show toast notifications
@@ -91,18 +101,28 @@ export default function Home() {
 
   return (
     <Container size="lg" py="xl">
-      <Title order={1} mb="xs" c="teal">Mean Reversion Dashboard</Title>
-      <Text c="dimmed" mb="xl">Design &amp; monitor your automated trading rules.</Text>
+      <Group justify="space-between" align="center" mb="xs" wrap="nowrap">
+        <Title order={3} c="teal">Mean Reversion Dashboard</Title>
+        <ActionIcon variant="subtle" color="gray" size="lg" onClick={() => signOut()} title="Sign out">
+          <IconLogout size={20} />
+        </ActionIcon>
+      </Group>
+      {(() => {
+        const firstDate = Object.values(metricsMap)[0]?.lastDate;
+        return firstDate ? <Text size="xs" c="dimmed" mb="md">{firstDate}</Text> : <Box mb="md" />;
+      })()}
 
       <Grid>
-        <Grid.Col span={{ base: 12, md: 4 }}>
+        <Grid.Col span={4} visibleFrom="md">
           <StrategyForm onStrategyCreated={loadStrategies} />
         </Grid.Col>
 
         <Grid.Col span={{ base: 12, md: 8 }}>
-          {strategies.length === 0 ? (
+          {loading ? (
+            <Loader color="teal" display="block" mx="auto" mt="xl" />
+          ) : strategies.length === 0 ? (
             <Text c="dimmed" fs="italic" ta="center" mt="xl">
-              No strategies created yet. Add one from the sidebar.
+              No strategies created yet.{isMobile ? ' Tap + to add one.' : ' Add one from the sidebar.'}
             </Text>
           ) : (
             strategies.map(s => (
@@ -117,6 +137,27 @@ export default function Home() {
           )}
         </Grid.Col>
       </Grid>
+
+      {/* Mobile: FAB + Drawer for new strategy form */}
+      {isMobile && (
+        <>
+          <ActionIcon
+            color="teal"
+            size={50}
+            radius="xl"
+            variant="filled"
+            onClick={openDrawer}
+            style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 100 }}
+          >
+            <IconPlus size={24} />
+          </ActionIcon>
+          <Drawer opened={drawerOpened} onClose={closeDrawer} title="New Strategy" position="bottom" size="auto">
+            <Box pb="md">
+              <StrategyForm onStrategyCreated={() => { loadStrategies(); closeDrawer(); }} />
+            </Box>
+          </Drawer>
+        </>
+      )}
     </Container>
   );
 }
