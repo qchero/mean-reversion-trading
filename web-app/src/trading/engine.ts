@@ -271,9 +271,12 @@ export class TradingEngine {
     }
 
     if (action) {
+      // Lock synchronously BEFORE any async work to prevent duplicate orders
+      this.lockedTickers.add(symbol);
       try {
         await this.placeOrder(state, action.step, action.side, action.price, action.qty);
       } catch (err) {
+        this.lockedTickers.delete(symbol);
         console.error(`[Engine] Failed to place order for ${symbol}:`, (err as Error).message);
       }
     }
@@ -311,7 +314,6 @@ export class TradingEngine {
     });
 
     this.activeOrders.set(order.id, order);
-    this.lockedTickers.add(symbol);
 
     console.log(
       `[${timestamp()}] [Engine] ${side} MKT order: ${symbol} step ${step} | ${roundedQty} shares (trigger $${roundedPrice})`,
@@ -334,6 +336,9 @@ export class TradingEngine {
 
     if (!isFilled && !isCancelled) return; // ignore intermediate statuses
 
+    // Remove immediately to prevent duplicate processing (IBKR sends each callback twice)
+    this.activeOrders.delete(dbOrder.id);
+
     try {
       const newStatus = isFilled ? 'filled' : 'cancelled';
 
@@ -348,7 +353,6 @@ export class TradingEngine {
           cancelledAt: isCancelled ? new Date() : undefined,
         },
       });
-      this.activeOrders.set(dbOrder.id, updated);
 
       if (isFilled && fill.filled > 0) {
         await this.recordTrade(updated);
