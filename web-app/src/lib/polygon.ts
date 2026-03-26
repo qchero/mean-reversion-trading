@@ -231,7 +231,13 @@ export function calculateStrategyMetrics(candles: { close: number; date: string 
 /**
  * Fetches the real-time or most recent price snapshot for a symbol.
  */
-export async function getLatestPrice(symbol: string): Promise<number | null> {
+export interface PriceSnapshot {
+  price: number | null;
+  dayHigh: number | null;
+  dayLow: number | null;
+}
+
+export async function getLatestPrice(symbol: string): Promise<PriceSnapshot> {
   const normalizedSymbol = symbol.toUpperCase();
   const url = `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/${normalizedSymbol}?apiKey=${POLYGON_API_KEY}`;
 
@@ -239,22 +245,23 @@ export async function getLatestPrice(symbol: string): Promise<number | null> {
     const response = await fetch(url, { next: { revalidate: 60 } }); // Cache for 60 seconds
     if (!response.ok) {
       console.warn(`Polygon snapshot API error: ${response.statusText}`);
-      return null;
+      return { price: null, dayHigh: null, dayLow: null };
     }
 
     const data = await response.json();
     if (!data.ticker) {
-      return null;
+      return { price: null, dayHigh: null, dayLow: null };
     }
 
-    // Try to get the absolute most recent trade price, fallback to minute close, day close, previous day close.
     const ticker = data.ticker;
     const price = ticker.lastTrade?.p || ticker.min?.c || ticker.day?.c || ticker.prevDay?.c;
-    
-    return price ?? null;
+    const dayHigh = ticker.day?.h ?? null;
+    const dayLow = ticker.day?.l ?? null;
+
+    return { price: price ?? null, dayHigh, dayLow };
   } catch (error) {
     console.error("Error fetching latest price snapshot:", error);
-    return null;
+    return { price: null, dayHigh: null, dayLow: null };
   }
 }
 

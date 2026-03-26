@@ -19,6 +19,8 @@ interface Metrics {
   dailyVolatility: number;
   latestPrice: number;
   lastDate: string;
+  dayHigh: number | null;
+  dayLow: number | null;
 }
 
 interface StrategyCardProps {
@@ -170,9 +172,22 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
   };
 
   // Derived trade lists
-  const openTrades = trades.filter(t => t.sellPrice == null);
   const closedTrades = trades.filter(t => t.sellPrice != null);
   const totalClosedPnl = closedTrades.reduce((sum, t) => sum + (t.sellPrice! - t.buyPrice) * t.shares, 0);
+  // Dedup open trades: one per step, within maxSteps
+  const openTrades: Trade[] = [];
+  const seenSteps = new Set<number>();
+  for (const t of trades) {
+    if (t.sellPrice == null && t.step <= strategy.maxSteps && !seenSteps.has(t.step)) {
+      seenSteps.add(t.step);
+      openTrades.push(t);
+    }
+  }
+  const maxHeldStep = openTrades.length > 0 ? Math.max(...openTrades.map(t => t.step)) : 0;
+  const tickerAllocated = openTrades.reduce((sum, t) => sum + t.buyPrice * t.shares, 0);
+  const tickerUnrealized = metrics
+    ? openTrades.reduce((sum, t) => sum + (metrics.latestPrice - t.buyPrice) * t.shares, 0)
+    : 0;
 
   const generatePreviewSteps = () => {
     if (!metrics?.sma200 || !j || !k || !maxSteps || !amount) return [];
@@ -281,12 +296,12 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       {/* Metrics summary — always visible */}
       {metrics && (
         <>
-          <Group mt="sm" justify="space-between" wrap="nowrap">
-            <div>
+          <Grid mt="sm" gutter="xs">
+            <Grid.Col span={{ base: 4, sm: openTrades.length > 0 ? 2 : 4 }}>
               <Text size="xs" c="dimmed">SMA 200</Text>
               <Text fw={600}>${metrics.sma200.toFixed(2)}</Text>
-            </div>
-            <div>
+            </Grid.Col>
+            <Grid.Col span={{ base: 4, sm: openTrades.length > 0 ? 2 : 4 }}>
               <Text size="xs" c="dimmed">Latest Price</Text>
               <Text fw={600} c={metrics.latestPrice < metrics.sma200 ? 'red' : 'teal'}>
                 ${metrics.latestPrice.toFixed(2)}
@@ -296,13 +311,33 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   </Text>
                 )}
               </Text>
-            </div>
-            <div>
+            </Grid.Col>
+            <Grid.Col span={{ base: 4, sm: openTrades.length > 0 ? 2 : 4 }}>
               <Text size="xs" c="dimmed" visibleFrom="sm">Daily Volatility (σ)</Text>
               <Text size="xs" c="dimmed" hiddenFrom="sm">σ</Text>
               <Text fw={600}>{(metrics.dailyVolatility * 100).toFixed(2)}%</Text>
-            </div>
-          </Group>
+            </Grid.Col>
+            {openTrades.length > 0 && (
+              <>
+                <Grid.Col span={{ base: 4, sm: 2 }}>
+                  <Text size="xs" c="dimmed">Allocated</Text>
+                  <Text fw={600}>${tickerAllocated.toLocaleString(undefined, { maximumFractionDigits: 0 })}</Text>
+                </Grid.Col>
+                <Grid.Col span={{ base: 4, sm: 2 }}>
+                  <Text size="xs" c="dimmed">Realized</Text>
+                  <Text fw={600} c={totalClosedPnl >= 0 ? 'teal' : 'red'}>
+                    {totalClosedPnl >= 0 ? '+' : ''}${totalClosedPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </Text>
+                </Grid.Col>
+                <Grid.Col span={{ base: 4, sm: 2 }}>
+                  <Text size="xs" c="dimmed">Unrealized</Text>
+                  <Text fw={600} c={tickerUnrealized >= 0 ? 'teal' : 'red'}>
+                    {tickerUnrealized >= 0 ? '+' : ''}${tickerUnrealized.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </Text>
+                </Grid.Col>
+              </>
+            )}
+          </Grid>
 
           {/* σ Gauge — left is positive (high price), right is negative (low price / buy zone) */}
           {currentSigma !== null && steps.length > 0 && (() => {
@@ -313,17 +348,30 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
             const stepSigmas = Array.from({ length: _max }, (_, i) => -(_j + i * _k));
             // Step sell σ values (negative, less negative than buy): step i sell σ = -(j + (i-1)*k)
             const sellSigmas = Array.from({ length: _max }, (_, i) => -(_j + (i - 1) * _k));
-            // Left edge: include sell targets for bought steps
+            // Left edge: include sell targets for bought steps + day range
             const boughtSellSigmas = sellSigmas.filter((_, i) => steps[i]?.isBought);
             const allPoints = [currentSigma, stepSigmas[0], ...boughtSellSigmas];
+            // Include day high/low σ in range if available
+            const dayHighSigmaRaw = metrics.dayHigh && metrics.sma200 > 0 && metrics.dailyVolatility > 0
+              ? (metrics.dayHigh / metrics.sma200 - 1) / metrics.dailyVolatility : null;
+            const dayLowSigmaRaw = metrics.dayLow && metrics.sma200 > 0 && metrics.dailyVolatility > 0
+              ? (metrics.dayLow / metrics.sma200 - 1) / metrics.dailyVolatility : null;
+            if (dayHighSigmaRaw !== null) allPoints.push(dayHighSigmaRaw);
+            if (dayLowSigmaRaw !== null) allPoints.push(dayLowSigmaRaw);
             const leftSigma = Math.max(...allPoints) + 1;
             // Right edge: max of current σ and last step σ, plus padding
-            const rightSigma = Math.min(currentSigma, stepSigmas[stepSigmas.length - 1]) - 1;
+            const rightSigma = Math.min(currentSigma, stepSigmas[stepSigmas.length - 1], ...(dayLowSigmaRaw !== null ? [dayLowSigmaRaw] : [])) - 1;
             const range = leftSigma - rightSigma; // leftSigma > rightSigma (positive to negative)
             // Map σ value to % position (left=0%, right=100%)
             const toPercent = (sigma: number) =>
               Math.max(0, Math.min(100, ((leftSigma - sigma) / range) * 100));
             const currentPos = toPercent(currentSigma);
+
+            // Day range in σ-space
+            const dayHighSigma = metrics.dayHigh && metrics.sma200 > 0 && metrics.dailyVolatility > 0
+              ? (metrics.dayHigh / metrics.sma200 - 1) / metrics.dailyVolatility : null;
+            const dayLowSigma = metrics.dayLow && metrics.sma200 > 0 && metrics.dailyVolatility > 0
+              ? (metrics.dayLow / metrics.sma200 - 1) / metrics.dailyVolatility : null;
 
             return (
               <Box mt="sm" px="md" pb="xs">
@@ -333,6 +381,23 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                     position: 'absolute', top: 16, left: 0, right: 0, height: 4,
                     backgroundColor: 'var(--mantine-color-dark-5)', borderRadius: 2,
                   }} />
+
+                  {/* Day price range band */}
+                  {dayHighSigma !== null && dayLowSigma !== null && (
+                    <Tooltip label={`Day range: $${metrics.dayLow!.toFixed(2)} – $${metrics.dayHigh!.toFixed(2)} (${(dayHighSigma - dayLowSigma).toFixed(1)}σ)`} withArrow>
+                      <Box style={{
+                        position: 'absolute',
+                        top: 13,
+                        left: `${toPercent(dayHighSigma)}%`,
+                        width: `${Math.max(1, toPercent(dayLowSigma) - toPercent(dayHighSigma))}%`,
+                        height: 10,
+                        backgroundColor: 'var(--mantine-color-orange-5)',
+                        opacity: 0.2,
+                        borderRadius: 3,
+                        cursor: 'default',
+                      }} />
+                    </Tooltip>
+                  )}
 
                   {/* 0σ separator line */}
                   {currentSigma > 0 && (
@@ -437,7 +502,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                   label="Max Steps"
                   value={maxSteps}
                   onChange={setMaxSteps}
-                  min={1}
+                  min={Math.max(1, maxHeldStep)}
                   disabled={autoExecute}
                   error={lastStepError ? 'Reduce steps or k' : undefined}
                 />

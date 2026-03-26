@@ -81,8 +81,9 @@ export async function getStrategyPreviewData(symbol: string) {
     const day = String(expectedEnd.getDate()).padStart(2, '0');
     const expectedDate = `${year}-${month}-${day}`;
 
-    // Concurrently try fetching the live snapshot price
-    const livePricePromise = getLatestPrice(normalizedSymbol).catch(() => null);
+    // Concurrently try fetching the live snapshot
+    const defaultSnap = { price: null, dayHigh: null, dayLow: null };
+    const snapPromise = getLatestPrice(normalizedSymbol).catch(() => defaultSnap);
 
     // 1. Fast path: hit SymbolCache first — single tiny DB query, no candle work needed
     const cached = await prisma.symbolCache.findUnique({
@@ -90,14 +91,16 @@ export async function getStrategyPreviewData(symbol: string) {
     });
 
     if (cached && cached.lastDate >= expectedDate) {
-      const livePrice = await livePricePromise;
+      const snap = await snapPromise;
       return {
         success: true,
         data: {
           sma200: cached.sma200,
           dailyVolatility: cached.dailyVolatility,
-          latestPrice: livePrice !== null ? livePrice : cached.latestPrice,
+          latestPrice: snap.price !== null ? snap.price : cached.latestPrice,
           lastDate: cached.lastDate,
+          dayHigh: snap.dayHigh,
+          dayLow: snap.dayLow,
         },
       };
     }
@@ -107,8 +110,8 @@ export async function getStrategyPreviewData(symbol: string) {
     if (!candles || candles.length === 0) throw new Error('No candle data available');
 
     const metrics = calculateStrategyMetrics(candles);
-    const livePrice = await livePricePromise;
-    const resolvedLatestPrice = livePrice !== null ? livePrice : metrics.latestPrice;
+    const snap = await snapPromise;
+    const resolvedLatestPrice = snap.price !== null ? snap.price : metrics.latestPrice;
 
     await prisma.symbolCache.upsert({
       where: { symbol: normalizedSymbol },
@@ -127,7 +130,7 @@ export async function getStrategyPreviewData(symbol: string) {
       },
     });
 
-    return { success: true, data: { ...metrics, latestPrice: resolvedLatestPrice } };
+    return { success: true, data: { ...metrics, latestPrice: resolvedLatestPrice, dayHigh: snap.dayHigh, dayLow: snap.dayLow } };
   } catch (error: any) {
     return {
       success: false,
@@ -159,25 +162,28 @@ export async function getBatchPreviewData(symbols: string[]) {
   });
   const cacheMap = new Map(caches.map(c => [c.symbol, c]));
 
-  // Fetch live prices in parallel
-  const priceResults = await Promise.all(
-    normalized.map(s => getLatestPrice(s).catch(() => null))
+  // Fetch live snapshots in parallel
+  const defaultSnap = { price: null, dayHigh: null, dayLow: null };
+  const snapResults = await Promise.all(
+    normalized.map(s => getLatestPrice(s).catch(() => defaultSnap))
   );
-  const priceMap = new Map(normalized.map((s, i) => [s, priceResults[i]]));
+  const snapMap = new Map(normalized.map((s, i) => [s, snapResults[i] ?? defaultSnap]));
 
-  const results: Record<string, { sma200: number; dailyVolatility: number; latestPrice: number; lastDate: string }> = {};
+  const results: Record<string, { sma200: number; dailyVolatility: number; latestPrice: number; lastDate: string; dayHigh: number | null; dayLow: number | null }> = {};
 
   // Process each symbol: use cache if fresh, else recalculate
   await Promise.all(normalized.map(async (symbol) => {
     const cached = cacheMap.get(symbol);
-    const livePrice = priceMap.get(symbol) ?? null;
+    const snap = snapMap.get(symbol) ?? defaultSnap;
 
     if (cached && cached.lastDate >= expectedDate) {
       results[symbol] = {
         sma200: cached.sma200,
         dailyVolatility: cached.dailyVolatility,
-        latestPrice: livePrice !== null ? livePrice : cached.latestPrice,
+        latestPrice: snap.price !== null ? snap.price : cached.latestPrice,
         lastDate: cached.lastDate,
+        dayHigh: snap.dayHigh,
+        dayLow: snap.dayLow,
       };
       return;
     }
@@ -187,7 +193,7 @@ export async function getBatchPreviewData(symbols: string[]) {
       const candles = await getOrFetchHistoricalData(symbol);
       if (!candles || candles.length === 0) return;
       const metrics = calculateStrategyMetrics(candles);
-      const resolvedPrice = livePrice !== null ? livePrice : metrics.latestPrice;
+      const resolvedPrice = snap.price !== null ? snap.price : metrics.latestPrice;
 
       await prisma.symbolCache.upsert({
         where: { symbol },
@@ -195,7 +201,7 @@ export async function getBatchPreviewData(symbols: string[]) {
         create: { symbol, lastDate: metrics.lastDate, sma200: metrics.sma200, dailyVolatility: metrics.dailyVolatility, latestPrice: resolvedPrice },
       });
 
-      results[symbol] = { ...metrics, latestPrice: resolvedPrice };
+      results[symbol] = { ...metrics, latestPrice: resolvedPrice, dayHigh: snap.dayHigh, dayLow: snap.dayLow };
     } catch {
       // skip failed symbols
     }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { ActionIcon, Box, Container, Drawer, Group, Loader, Title, Text, Grid } from '@mantine/core';
+import { ActionIcon, Box, Container, Drawer, Group, Loader, Paper, Title, Text, Grid } from '@mantine/core';
 import { useDisclosure, useMediaQuery } from '@mantine/hooks';
 import { IconLogout, IconPlus } from '@tabler/icons-react';
 import { signOut } from 'next-auth/react';
@@ -16,6 +16,8 @@ interface StrategyMetrics {
   dailyVolatility: number;
   latestPrice: number;
   lastDate: string;
+  dayHigh: number | null;
+  dayLow: number | null;
 }
 
 export default function Home() {
@@ -109,7 +111,56 @@ export default function Home() {
       </Group>
       {(() => {
         const firstDate = Object.values(metricsMap)[0]?.lastDate;
-        return firstDate ? <Text size="xs" c="dimmed" mb="md">{firstDate}</Text> : <Box mb="md" />;
+        return firstDate ? <Text size="xs" c="dimmed" mb="sm">{firstDate}</Text> : <Box mb="sm" />;
+      })()}
+
+      {/* Top-level stats */}
+      {!loading && strategies.length > 0 && (() => {
+        let totalAllocated = 0;
+        let realizedGains = 0;
+        let unrealizedGains = 0;
+
+        for (const s of strategies) {
+          const trades = tradesMap[s.id] ?? [];
+          const m = metricsMap[s.symbol];
+          // Track which steps have an open (held) trade — only count first per step
+          const heldSteps = new Set<number>();
+          for (const t of trades) {
+            if (t.sellPrice != null) {
+              // Closed trade — realized
+              realizedGains += (t.sellPrice - t.buyPrice) * t.shares;
+            } else if (t.step <= s.maxSteps && !heldSteps.has(t.step)) {
+              // Open trade within current step range — allocated + unrealized
+              heldSteps.add(t.step);
+              const allocated = t.buyPrice * t.shares;
+              totalAllocated += allocated;
+              if (m) {
+                unrealizedGains += (m.latestPrice - t.buyPrice) * t.shares;
+              }
+            }
+          }
+        }
+
+        return (
+          <Group justify="space-between" mb="md">
+            <Paper p="xs" radius="sm" style={{ flex: 1, textAlign: 'center' }}>
+              <Text size="xs" c="dimmed">Allocated</Text>
+              <Text fw={600}>${totalAllocated.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</Text>
+            </Paper>
+            <Paper p="xs" radius="sm" style={{ flex: 1, textAlign: 'center' }}>
+              <Text size="xs" c="dimmed">Realized P&L</Text>
+              <Text fw={600} c={realizedGains >= 0 ? 'teal' : 'red'}>
+                {realizedGains >= 0 ? '+' : ''}${realizedGains.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </Text>
+            </Paper>
+            <Paper p="xs" radius="sm" style={{ flex: 1, textAlign: 'center' }}>
+              <Text size="xs" c="dimmed">Unrealized P&L</Text>
+              <Text fw={600} c={unrealizedGains >= 0 ? 'teal' : 'red'}>
+                {unrealizedGains >= 0 ? '+' : ''}${unrealizedGains.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </Text>
+            </Paper>
+          </Group>
+        );
       })()}
 
       <Grid>
