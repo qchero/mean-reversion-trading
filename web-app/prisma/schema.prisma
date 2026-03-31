@@ -83,6 +83,12 @@ model DailyCandle {
   @@unique([symbol, date])
 }
 
+// Singleton heartbeat — upserted by the trading engine every ~60s
+model EngineHeartbeat {
+  id        String   @id @default("singleton")
+  timestamp DateTime @updatedAt
+}
+
 // Cached calculation results — invalidated when the lastDate changes
 model SymbolCache {
   id              String   @id @default(cuid())

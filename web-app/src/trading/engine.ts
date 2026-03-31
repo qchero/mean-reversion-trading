@@ -61,6 +61,7 @@ export class TradingEngine {
   private simTickTimer: ReturnType<typeof setInterval> | null = null;
   private lastLogTime = new Map<string, number>();   // symbol → last log timestamp
   private readonly LOG_INTERVAL_MS = 60_000;         // log tick digest at most once per minute
+  private pendingFills: OrderFill[] = [];             // fills that arrived before DB write completed
 
   constructor(client: IBKRClient, simulate = false) {
     this.ibkr = client;
@@ -82,6 +83,7 @@ export class TradingEngine {
     // Set up callbacks
     this.ibkr.setOnTick((tick) => this.handleTick(tick));
     this.ibkr.setOnOrderStatus((fill) => this.handleOrderStatus(fill));
+    this.ibkr.setOnReconnect(() => this.handleReconnect());
 
     // Load strategies and subscribe to market data
     await this.loadStrategies();
@@ -134,6 +136,16 @@ export class TradingEngine {
     this.ibkr.disconnect();
     await prisma.$disconnect();
     console.log('[Engine] Stopped.');
+  }
+
+  // ── Reconnection ──
+
+  private async handleReconnect() {
+    console.log('[Engine] IBKR reconnected — refreshing DB state and checking for missed fills');
+    await this.loadStrategies();
+    if (this.activeOrders.size > 0) {
+      this.ibkr.reqAllOpenOrders();
+    }
   }
 
   // ── Strategy Loading ──
@@ -206,6 +218,13 @@ export class TradingEngine {
         const sym = strategies.find((s) => s.id === o.strategyId)?.symbol;
         if (sym) this.lockedTickers.add(sym);
       }
+
+      // Heartbeat — let the web app know the engine is alive
+      await prisma.engineHeartbeat.upsert({
+        where: { id: 'singleton' },
+        update: { timestamp: new Date() },
+        create: { id: 'singleton', timestamp: new Date() },
+      });
     } catch (err) {
       console.error('[Engine] Failed to load strategies (will retry next cycle):', (err as Error).message);
     }
@@ -301,23 +320,40 @@ export class TradingEngine {
     const ibkrOrderId = this.ibkr.placeMarketOrder(symbol, side, roundedQty);
 
     // Persist to DB (limitPrice stores the trigger price for reference)
-    const order = await prisma.order.create({
-      data: {
-        strategyId: state.strategy.id,
-        step,
-        side,
-        ibkrOrderId,
-        status: 'submitted',
-        limitPrice: roundedPrice,
-        totalQty: roundedQty,
-      },
-    });
+    // NOTE: IBKR may fill instantly (market orders on liquid stocks), so the
+    // fill callback can arrive during this await. Fills for unknown orders are
+    // queued in pendingFills and replayed below.
+    let order: Order;
+    try {
+      order = await prisma.order.create({
+        data: {
+          strategyId: state.strategy.id,
+          step,
+          side,
+          ibkrOrderId,
+          status: 'submitted',
+          limitPrice: roundedPrice,
+          totalQty: roundedQty,
+        },
+      });
+    } catch (err) {
+      // DB write failed — discard any fills that queued for this IBKR order
+      this.pendingFills = this.pendingFills.filter((f) => f.ibkrOrderId !== ibkrOrderId);
+      throw err;
+    }
 
     this.activeOrders.set(order.id, order);
 
     console.log(
       `[${timestamp()}] [Engine] ${side} MKT order: ${symbol} step ${step} | ${roundedQty} shares (trigger $${roundedPrice})`,
     );
+
+    // Replay any fills that arrived during the DB write
+    const pending = this.pendingFills.filter((f) => f.ibkrOrderId === ibkrOrderId);
+    this.pendingFills = this.pendingFills.filter((f) => f.ibkrOrderId !== ibkrOrderId);
+    for (const fill of pending) {
+      await this.handleOrderStatus(fill);
+    }
   }
 
   private async handleOrderStatus(fill: OrderFill) {
@@ -329,7 +365,14 @@ export class TradingEngine {
         break;
       }
     }
-    if (!dbOrder) return;
+    if (!dbOrder) {
+      // Fill arrived before placeOrder finished its DB write — queue for later
+      const isTerminal = fill.status === 'Filled' || fill.status === 'Cancelled' || fill.status === 'Inactive';
+      if (isTerminal) {
+        this.pendingFills.push(fill);
+      }
+      return;
+    }
 
     const isFilled = fill.status === 'Filled';
     const isCancelled = fill.status === 'Cancelled' || fill.status === 'Inactive';

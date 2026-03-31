@@ -35,6 +35,7 @@ export interface OrderFill {
 
 export type OnTickCallback = (tick: MarketTick) => void;
 export type OnOrderStatusCallback = (fill: OrderFill) => void;
+export type OnReconnectCallback = () => void;
 
 // ── IBKR Client ──
 
@@ -44,12 +45,20 @@ export class IBKRClient {
   private connected = false;
   private onTick: OnTickCallback | null = null;
   private onOrderStatus: OnOrderStatusCallback | null = null;
+  private onReconnect: OnReconnectCallback | null = null;
 
   // Market data tracking: reqId → symbol, and symbol → latest bid/ask
   private reqIdToSymbol = new Map<number, string>();
   private symbolToReqId = new Map<string, number>();
   private nextReqId = 1000;
   private quotes = new Map<string, MarketTick>();
+
+  // Reconnection state
+  private intentionalDisconnect = false;
+  private reconnecting = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private static readonly RECONNECT_DELAYS = [5, 10, 30, 60]; // seconds, then 60s forever
 
   constructor(
     private host = '127.0.0.1',
@@ -69,6 +78,9 @@ export class IBKRClient {
     this.ib.on(EventName.disconnected, () => {
       this.connected = false;
       console.log('[IBKR] Disconnected');
+      if (!this.intentionalDisconnect && !this.reconnecting) {
+        this.scheduleReconnect();
+      }
     });
 
     this.ib.on(EventName.nextValidId, (id: number) => {
@@ -139,6 +151,8 @@ export class IBKRClient {
   }
 
   disconnect() {
+    this.intentionalDisconnect = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ib.disconnect();
   }
 
@@ -227,6 +241,45 @@ export class IBKRClient {
 
   setOnOrderStatus(cb: OnOrderStatusCallback) {
     this.onOrderStatus = cb;
+  }
+
+  setOnReconnect(cb: OnReconnectCallback) {
+    this.onReconnect = cb;
+  }
+
+  // ── Reconnection ──
+
+  private scheduleReconnect() {
+    const delayIdx = Math.min(this.reconnectAttempt, IBKRClient.RECONNECT_DELAYS.length - 1);
+    const delaySec = IBKRClient.RECONNECT_DELAYS[delayIdx];
+    this.reconnectAttempt++;
+
+    console.log(`[IBKR] Reconnecting in ${delaySec}s (attempt ${this.reconnectAttempt})...`);
+    this.reconnectTimer = setTimeout(() => this.attemptReconnect(), delaySec * 1000);
+  }
+
+  private async attemptReconnect() {
+    this.reconnecting = true;
+    try {
+      await this.connect();
+      this.reconnecting = false;
+      console.log('[IBKR] Reconnected successfully');
+      this.reconnectAttempt = 0;
+      this.resubscribeAll();
+      if (this.onReconnect) this.onReconnect();
+    } catch (err) {
+      this.reconnecting = false;
+      console.error('[IBKR] Reconnect failed:', (err as Error).message);
+      this.scheduleReconnect();
+    }
+  }
+
+  private resubscribeAll() {
+    for (const [symbol, reqId] of this.symbolToReqId) {
+      const contract = this.stockContract(symbol);
+      this.ib.reqMktData(reqId, contract, '', false, false);
+      console.log(`[IBKR] Re-subscribed: ${symbol} (reqId=${reqId})`);
+    }
   }
 
   // ── Helpers ──

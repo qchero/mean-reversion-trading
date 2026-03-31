@@ -43,14 +43,17 @@ import { TradingEngine } from './engine';
 function createMockIBKR(): IBKRClient & {
   _onTick: ((tick: any) => void) | null;
   _onOrderStatus: ((fill: OrderFill) => void) | null;
+  _onReconnect: (() => void) | null;
 } {
   const mock: any = {
     _onTick: null,
     _onOrderStatus: null,
+    _onReconnect: null,
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn(),
     setOnTick: vi.fn((cb: any) => { mock._onTick = cb; }),
     setOnOrderStatus: vi.fn((cb: any) => { mock._onOrderStatus = cb; }),
+    setOnReconnect: vi.fn((cb: any) => { mock._onReconnect = cb; }),
     placeMarketOrder: vi.fn().mockReturnValue(100),
     subscribeMarketData: vi.fn(),
     unsubscribeMarketData: vi.fn(),
@@ -335,6 +338,63 @@ describe('TradingEngine', () => {
 
       // trade.create should be called only ONCE (not twice — this was creating duplicate trades)
       expect(mockPrisma.trade.create).toHaveBeenCalledTimes(1);
+
+      await engine.stop();
+    });
+  });
+
+  describe('fast fill race condition (fill arrives before DB write)', () => {
+    it('processes fill that arrives during order.create and unlocks ticker', async () => {
+      // Simulate: order.create is slow, IBKR fills instantly
+      let resolveCreate!: (v: any) => void;
+      mockPrisma.order.create.mockImplementation(
+        () => new Promise((resolve) => { resolveCreate = resolve; }),
+      );
+
+      // Fill processing mocks
+      const filledOrder = makeOrder({
+        status: 'filled',
+        filledQty: 11,
+        avgFillPrice: 455,
+      });
+      mockPrisma.order.update.mockResolvedValue(filledOrder);
+      mockPrisma.strategy.findUnique.mockResolvedValue(STRATEGY);
+      mockPrisma.trade.create.mockResolvedValue(makeTrade());
+
+      const engine = await startEngine(ibkr);
+
+      const tick = { symbol: 'MA', bid: 454, ask: 455, last: 455 };
+      engine.injectTick(tick);
+
+      // Order placed with IBKR
+      expect(ibkr.placeMarketOrder).toHaveBeenCalledTimes(1);
+
+      // IBKR fills instantly while DB write is still pending
+      ibkr._onOrderStatus!({
+        ibkrOrderId: 100,
+        status: 'Filled',
+        filled: 11,
+        remaining: 0,
+        avgFillPrice: 455,
+      });
+
+      // Now resolve the DB write — this should replay the queued fill
+      resolveCreate(makeOrder());
+
+      // Wait for async processing
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Fill should have been processed (trade created)
+      expect(mockPrisma.trade.create).toHaveBeenCalledTimes(1);
+
+      // Ticker should be unlocked — verify by sending another tick
+      setupLoadMocks([makeTrade()]);
+      await (engine as any).loadStrategies();
+      mockPrisma.order.create.mockResolvedValue(makeOrder({ id: 'order-2', side: 'SELL', step: 1 }));
+
+      const sellTick = { symbol: 'MA', bid: 467, ask: 468, last: 468 };
+      engine.injectTick(sellTick);
+      expect(ibkr.placeMarketOrder).toHaveBeenCalledTimes(2); // unlocked!
 
       await engine.stop();
     });

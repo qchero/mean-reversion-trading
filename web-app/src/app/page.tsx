@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { ActionIcon, Box, Container, Drawer, Group, Loader, Paper, Title, Text, Grid } from '@mantine/core';
+import { ActionIcon, Box, Container, Drawer, Group, Loader, Paper, Title, Text, Grid, Badge } from '@mantine/core';
 import { useDisclosure, useMediaQuery } from '@mantine/hooks';
 import { IconLogout, IconPlus } from '@tabler/icons-react';
 import { signOut } from 'next-auth/react';
 import { notifications } from '@mantine/notifications';
 import StrategyForm from '@/components/StrategyForm';
 import StrategyCard from '@/components/StrategyCard';
-import { getStrategies, getBatchPreviewData, getAllTrades, getRecentOrderEvents } from '@/app/actions';
+import { getStrategies, getBatchPreviewData, getAllTrades, getRecentOrderEvents, getEngineHeartbeat } from '@/app/actions';
 import { Strategy, Trade } from '@prisma/client';
 
 interface StrategyMetrics {
@@ -20,11 +20,33 @@ interface StrategyMetrics {
   dayLow: number | null;
 }
 
+function EngineStatus({ heartbeat }: { heartbeat: Date | null }) {
+  const [, setTick] = useState(0);
+  // Re-render every 5s to keep the relative time fresh
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (!heartbeat) return null;
+
+  const agoSec = Math.floor((Date.now() - new Date(heartbeat).getTime()) / 1000);
+  const label = agoSec < 60 ? `${agoSec}s ago` : `${Math.floor(agoSec / 60)}m ago`;
+  const alive = agoSec < 120;
+
+  return (
+    <Badge variant="dot" color={alive ? 'green' : 'red'} size="sm">
+      Engine: {label}
+    </Badge>
+  );
+}
+
 export default function Home() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [metricsMap, setMetricsMap] = useState<Record<string, StrategyMetrics>>({});
   const [tradesMap, setTradesMap] = useState<Record<string, Trade[]>>({});
   const [loading, setLoading] = useState(true);
+  const [heartbeat, setHeartbeat] = useState<Date | null>(null);
   const [drawerOpened, { open: openDrawer, close: closeDrawer }] = useDisclosure(false);
   const isMobile = useMediaQuery('(max-width: 768px)');
   const notifiedOrderIds = useRef(new Set<string>());
@@ -63,8 +85,12 @@ export default function Home() {
   // Poll for order events and show toast notifications
   const pollOrderEvents = useCallback(async () => {
     try {
-      const events = await getRecentOrderEvents(lastPollTime.current);
+      const [events, hb] = await Promise.all([
+        getRecentOrderEvents(lastPollTime.current),
+        getEngineHeartbeat(),
+      ]);
       lastPollTime.current = Date.now();
+      setHeartbeat(hb);
 
       for (const event of events) {
         if (notifiedOrderIds.current.has(event.id)) continue;
@@ -96,8 +122,8 @@ export default function Home() {
   useEffect(() => {
     loadStrategies();
 
-    // Poll for order notifications every 5 seconds
-    const interval = setInterval(pollOrderEvents, 5000);
+    // Poll for order notifications every 30 seconds
+    const interval = setInterval(pollOrderEvents, 30000);
     return () => clearInterval(interval);
   }, [pollOrderEvents]);
 
@@ -105,14 +131,25 @@ export default function Home() {
     <Container size="lg" py="xl">
       <Group justify="space-between" align="center" mb="xs" wrap="nowrap">
         <Title order={3} c="teal">Mean Reversion Dashboard</Title>
-        <ActionIcon variant="subtle" color="gray" size="lg" onClick={() => signOut()} title="Sign out">
-          <IconLogout size={20} />
-        </ActionIcon>
+        <Group gap="sm">
+          {(() => {
+            const firstDate = Object.values(metricsMap)[0]?.lastDate;
+            if (!firstDate) return null;
+            const agoMs = Date.now() - new Date(firstDate + 'T16:00:00-04:00').getTime(); // market close ET
+            const agoHrs = Math.floor(agoMs / 3_600_000);
+            const label = agoHrs < 24 ? `${agoHrs}h ago` : `${Math.floor(agoHrs / 24)}d ago`;
+            return (
+              <Badge variant="dot" color="gray" size="sm">
+                Quotes: {label}
+              </Badge>
+            );
+          })()}
+          <EngineStatus heartbeat={heartbeat} />
+          <ActionIcon variant="subtle" color="gray" size="lg" onClick={() => signOut()} title="Sign out">
+            <IconLogout size={20} />
+          </ActionIcon>
+        </Group>
       </Group>
-      {(() => {
-        const firstDate = Object.values(metricsMap)[0]?.lastDate;
-        return firstDate ? <Text size="xs" c="dimmed" mb="sm">{firstDate}</Text> : <Box mb="sm" />;
-      })()}
 
       {/* Top-level stats */}
       {!loading && strategies.length > 0 && (() => {

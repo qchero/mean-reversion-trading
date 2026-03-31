@@ -172,7 +172,9 @@ export async function getBatchPreviewData(symbols: string[]) {
   const results: Record<string, { sma200: number; dailyVolatility: number; latestPrice: number; lastDate: string; dayHigh: number | null; dayLow: number | null }> = {};
 
   // Process each symbol: use cache if fresh, else recalculate
-  await Promise.all(normalized.map(async (symbol) => {
+  // Cache misses run sequentially to avoid exhausting the DB connection pool
+  // (each getOrFetchHistoricalData does a $transaction with ~200 upserts)
+  for (const symbol of normalized) {
     const cached = cacheMap.get(symbol);
     const snap = snapMap.get(symbol) ?? defaultSnap;
 
@@ -185,13 +187,13 @@ export async function getBatchPreviewData(symbols: string[]) {
         dayHigh: snap.dayHigh,
         dayLow: snap.dayLow,
       };
-      return;
+      continue;
     }
 
     // Cache miss — fetch + calculate + upsert
     try {
       const candles = await getOrFetchHistoricalData(symbol);
-      if (!candles || candles.length === 0) return;
+      if (!candles || candles.length === 0) continue;
       const metrics = calculateStrategyMetrics(candles);
       const resolvedPrice = snap.price !== null ? snap.price : metrics.latestPrice;
 
@@ -205,7 +207,7 @@ export async function getBatchPreviewData(symbols: string[]) {
     } catch {
       // skip failed symbols
     }
-  }));
+  }
 
   return results;
 }
@@ -278,6 +280,11 @@ export async function deleteOrder(id: string) {
   }
   await prisma.order.delete({ where: { id } });
   revalidatePath('/');
+}
+
+export async function getEngineHeartbeat(): Promise<Date | null> {
+  const row = await prisma.engineHeartbeat.findUnique({ where: { id: 'singleton' } });
+  return row?.timestamp ?? null;
 }
 
 export async function getRecentOrderEvents(sinceMs: number) {
