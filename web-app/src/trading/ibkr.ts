@@ -228,6 +228,34 @@ export class IBKRClient {
     return orderId;
   }
 
+  /**
+   * Place a Limit on Close (LOC) order. Returns the IBKR order ID.
+   */
+  placeLOCOrder(
+    symbol: string,
+    action: 'BUY' | 'SELL',
+    quantity: number,
+    limitPrice: number
+  ): number {
+    const orderId = this.nextOrderId++;
+    const contract = this.stockContract(symbol);
+
+    const order: IBOrder = {
+      action: action === 'BUY' ? OrderAction.BUY : OrderAction.SELL,
+      orderType: OrderType.LOC,
+      lmtPrice: limitPrice,
+      totalQuantity: quantity,
+      tif: TimeInForce.DAY,
+      transmit: true,
+    };
+
+    this.ib.placeOrder(orderId, contract, order);
+    console.log(
+      `[IBKR] Placed ${action} LOC order #${orderId}: ${quantity} ${symbol} @ $${limitPrice.toFixed(2)}`,
+    );
+    return orderId;
+  }
+
   cancelOrder(ibkrOrderId: number) {
     this.ib.cancelOrder(ibkrOrderId);
     console.log(`[IBKR] Cancel requested for order #${ibkrOrderId}`);

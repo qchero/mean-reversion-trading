@@ -94,9 +94,94 @@ model SymbolCache {
   id              String   @id @default(cuid())
   symbol          String   @unique
   lastDate        String   // YYYY-MM-DD of the most recent candle used
+  sma100          Float    @default(0)
   sma200          Float
+  sma300          Float    @default(0)
   dailyVolatility Float
   latestPrice     Float
 
   updatedAt       DateTime @updatedAt
+}
+
+model LinearStrategy {
+  id              String   @id @default(cuid())
+  symbol          String   @unique
+  bandLo          Float    
+  bandHi          Float    
+  maxBudget       Float    
+  minTradeAmount  Float    
+  autoExecute     Boolean  @default(false)
+
+  // Cached metrics
+  sma100          Float?
+  sma200          Float?
+  sma300          Float?
+  dailyVolatility Float?
+  latestPrice     Float?
+  latestPriceAt   DateTime?
+  dayHigh         Float?
+  dayLow          Float?
+  
+  trades          LinearTrade[]
+  orders          LinearOrder[]
+  lots            LinearLot[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model LinearLot {
+  id              String   @id @default(cuid())
+  strategyId      String
+  strategy        LinearStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  date            String   // YYYY-MM-DD
+  price           Float
+  shares          Int      // Whole shares
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([strategyId])
+}
+
+model LinearTrade {
+  id              String   @id @default(cuid())
+  strategyId      String
+  strategy        LinearStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  date            String   // YYYY-MM-DD
+  action          String   // "BUY" or "SELL"
+  price           Float
+  shares          Int
+  targetValue     Float?
+  sigmaBelow      Float?
+  costBasis       Float?
+  pnl             Float?   // Realized PnL for sells
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([strategyId])
+}
+
+model LinearOrder {
+  id              String   @id @default(cuid())
+  strategyId      String
+  strategy        LinearStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  side            String   // "BUY" or "SELL"
+  ibkrOrderId     Int?     
+  status          String   @default("pending") // pending, submitted, filled, cancelled
+  limitPrice      Float    // Used as trigger log reference
+  totalQty        Int      // Whole shares
+  filledQty       Int      @default(0)
+  avgFillPrice    Float?
+  
+  expiresAt       DateTime?
+  filledAt        DateTime?
+  cancelledAt     DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([strategyId])
+  @@index([status])
 }

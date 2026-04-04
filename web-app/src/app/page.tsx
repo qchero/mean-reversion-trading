@@ -1,250 +1,97 @@
-"use client";
+import { LinearStrategyCard } from "@/components/LinearStrategyCard";
+import { getLinearStrategies } from "./actions-v2";
+import { Container, Title, SimpleGrid, Paper, Text } from "@mantine/core";
+import { NewStrategyModal } from "@/components/NewStrategyModal";
+import YahooFinance from 'yahoo-finance2';
+const yahooFinance = new YahooFinance();
 
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { ActionIcon, Box, Container, Drawer, Group, Loader, Paper, Title, Text, Grid, Badge } from '@mantine/core';
-import { useDisclosure, useMediaQuery } from '@mantine/hooks';
-import { IconLogout, IconPlus } from '@tabler/icons-react';
-import { signOut } from 'next-auth/react';
-import { notifications } from '@mantine/notifications';
-import StrategyForm from '@/components/StrategyForm';
-import StrategyCard from '@/components/StrategyCard';
-import { getStrategies, getBatchPreviewData, getAllTrades, getRecentOrderEvents, getEngineHeartbeat } from '@/app/actions';
-import { Strategy, Trade } from '@prisma/client';
+// Opt out of caching so we see DB state instantly
+export const revalidate = 0;
 
-interface StrategyMetrics {
-  sma200: number;
-  dailyVolatility: number;
-  latestPrice: number;
-  lastDate: string;
-  dayHigh: number | null;
-  dayLow: number | null;
-}
-
-function EngineStatus({ heartbeat }: { heartbeat: Date | null }) {
-  const [, setTick] = useState(0);
-  // Re-render every 5s to keep the relative time fresh
-  useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  if (!heartbeat) return null;
-
-  const agoSec = Math.floor((Date.now() - new Date(heartbeat).getTime()) / 1000);
-  const label = agoSec < 60 ? `${agoSec}s ago` : `${Math.floor(agoSec / 60)}m ago`;
-  const alive = agoSec < 120;
-
-  return (
-    <Badge variant="dot" color={alive ? 'green' : 'red'} size="sm">
-      Engine: {label}
-    </Badge>
-  );
-}
-
-export default function Home() {
-  const [strategies, setStrategies] = useState<Strategy[]>([]);
-  const [metricsMap, setMetricsMap] = useState<Record<string, StrategyMetrics>>({});
-  const [tradesMap, setTradesMap] = useState<Record<string, Trade[]>>({});
-  const [loading, setLoading] = useState(true);
-  const [heartbeat, setHeartbeat] = useState<Date | null>(null);
-  const [drawerOpened, { open: openDrawer, close: closeDrawer }] = useDisclosure(false);
-  const isMobile = useMediaQuery('(max-width: 768px)');
-  const notifiedOrderIds = useRef(new Set<string>());
-  const lastPollTime = useRef(Date.now());
-
-  const loadStrategies = async () => {
-    try {
-    const data = await getStrategies();
-
-    // Batch fetch metrics and trades in parallel
-    const uniqueSymbols = [...new Set(data.map(s => s.symbol))];
-    const [metricsResult, tradesResult] = await Promise.all([
-      uniqueSymbols.length > 0 ? getBatchPreviewData(uniqueSymbols) : {} as Record<string, StrategyMetrics>,
-      getAllTrades(),
-    ]);
-    setMetricsMap(metricsResult);
-    setTradesMap(tradesResult);
-
-    // Sort by σ-normalized deviation ASC (most negative σ = furthest below SMA = most triggered)
-    const sorted = [...data].sort((a, b) => {
-      const mA = metricsResult[a.symbol];
-      const mB = metricsResult[b.symbol];
-      const sigmaA = mA && mA.sma200 > 0 && mA.dailyVolatility > 0
-        ? (mA.latestPrice / mA.sma200 - 1) / mA.dailyVolatility : 0;
-      const sigmaB = mB && mB.sma200 > 0 && mB.dailyVolatility > 0
-        ? (mB.latestPrice / mB.sma200 - 1) / mB.dailyVolatility : 0;
-      return sigmaA - sigmaB;
-    });
-
-    setStrategies(sorted);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Poll for order events and show toast notifications
-  const pollOrderEvents = useCallback(async () => {
-    try {
-      const [events, hb] = await Promise.all([
-        getRecentOrderEvents(lastPollTime.current),
-        getEngineHeartbeat(),
-      ]);
-      lastPollTime.current = Date.now();
-      setHeartbeat(hb);
-
-      for (const event of events) {
-        if (notifiedOrderIds.current.has(event.id)) continue;
-        notifiedOrderIds.current.add(event.id);
-
-        const symbol = (event as any).strategy?.symbol || '???';
-        const isFilled = event.status === 'filled';
-        const filledInfo = event.filledQty > 0
-          ? `${event.filledQty}/${event.totalQty} shares @ $${event.avgFillPrice?.toFixed(2) || event.limitPrice.toFixed(2)}`
-          : 'not filled';
-
-        notifications.show({
-          title: `${symbol} Step ${event.step}: ${event.side} ${isFilled ? 'Filled' : 'Cancelled'}`,
-          message: filledInfo,
-          color: isFilled ? 'teal' : 'gray',
-          autoClose: 8000,
-        });
-      }
-
-      // If there were fills, refresh strategies to pick up new trade records
-      if (events.some(e => e.status === 'filled' && e.filledQty > 0)) {
-        loadStrategies();
-      }
-    } catch {
-      // silently ignore poll errors
-    }
-  }, []);
-
-  useEffect(() => {
-    loadStrategies();
-
-    // Poll for order notifications every 30 seconds
-    const interval = setInterval(pollOrderEvents, 30000);
-    return () => clearInterval(interval);
-  }, [pollOrderEvents]);
-
-  return (
-    <Container size="lg" py="xl">
-      <Group justify="space-between" align="center" mb="xs" wrap="nowrap">
-        <Title order={3} c="teal">Mean Reversion Dashboard</Title>
-        <Group gap="sm">
-          {(() => {
-            const firstDate = Object.values(metricsMap)[0]?.lastDate;
-            if (!firstDate) return null;
-            const agoMs = Date.now() - new Date(firstDate + 'T16:00:00-04:00').getTime(); // market close ET
-            const agoHrs = Math.floor(agoMs / 3_600_000);
-            const label = agoHrs < 24 ? `${agoHrs}h ago` : `${Math.floor(agoHrs / 24)}d ago`;
-            return (
-              <Badge variant="dot" color="gray" size="sm">
-                Quotes: {label}
-              </Badge>
-            );
-          })()}
-          <EngineStatus heartbeat={heartbeat} />
-          <ActionIcon variant="subtle" color="gray" size="lg" onClick={() => signOut()} title="Sign out">
-            <IconLogout size={20} />
-          </ActionIcon>
-        </Group>
-      </Group>
-
-      {/* Top-level stats */}
-      {!loading && strategies.length > 0 && (() => {
-        let totalAllocated = 0;
-        let realizedGains = 0;
-        let unrealizedGains = 0;
-
-        for (const s of strategies) {
-          const trades = tradesMap[s.id] ?? [];
-          const m = metricsMap[s.symbol];
-          // Track which steps have an open (held) trade — only count first per step
-          const heldSteps = new Set<number>();
-          for (const t of trades) {
-            if (t.sellPrice != null) {
-              // Closed trade — realized
-              realizedGains += (t.sellPrice - t.buyPrice) * t.shares;
-            } else if (t.step <= s.maxSteps && !heldSteps.has(t.step)) {
-              // Open trade within current step range — allocated + unrealized
-              heldSteps.add(t.step);
-              const allocated = t.buyPrice * t.shares;
-              totalAllocated += allocated;
-              if (m) {
-                unrealizedGains += (m.latestPrice - t.buyPrice) * t.shares;
-              }
-            }
-          }
+export default async function V2Dashboard() {
+  let strategies = await getLinearStrategies();
+  
+  // Fetch live prices and daily extrema directly from Yahoo Finance on page load
+  try {
+    const symbols = strategies.map(s => s.symbol);
+    if (symbols.length > 0) {
+      const quotes = await yahooFinance.quote(symbols);
+      const quoteMap = new Map();
+      
+      // Handle both single object and array responses from yahooFinance.quote
+      const quoteArray = Array.isArray(quotes) ? quotes : [quotes];
+      quoteArray.forEach((q: any) => quoteMap.set(q.symbol, q));
+      
+      strategies = strategies.map(s => {
+        const q = quoteMap.get(s.symbol);
+        if (q) {
+          return {
+            ...s,
+            latestPrice: q.regularMarketPrice ?? s.latestPrice,
+            dayHigh: q.regularMarketDayHigh ?? null,
+            dayLow: q.regularMarketDayLow ?? null
+          };
         }
+        return s;
+      });
+    }
+  } catch (error) {
+    console.error("[Next.js] Failed to fetch live quotes from Yahoo:", error);
+  }
+  
+  const totalInvested = strategies.reduce((sum: number, s: any) => sum + s.lots.reduce((acc: number, lot: any) => acc + lot.shares * lot.price, 0), 0);
+  const totalBudget = strategies.reduce((sum: number, s: any) => sum + s.maxBudget, 0);
 
-        return (
-          <Group justify="space-between" mb="md">
-            <Paper p="xs" radius="sm" style={{ flex: 1, textAlign: 'center' }}>
-              <Text size="xs" c="dimmed">Allocated</Text>
-              <Text fw={600}>${totalAllocated.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</Text>
-            </Paper>
-            <Paper p="xs" radius="sm" style={{ flex: 1, textAlign: 'center' }}>
-              <Text size="xs" c="dimmed">Realized P&L</Text>
-              <Text fw={600} c={realizedGains >= 0 ? 'teal' : 'red'}>
-                {realizedGains >= 0 ? '+' : ''}${realizedGains.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </Text>
-            </Paper>
-            <Paper p="xs" radius="sm" style={{ flex: 1, textAlign: 'center' }}>
-              <Text size="xs" c="dimmed">Unrealized P&L</Text>
-              <Text fw={600} c={unrealizedGains >= 0 ? 'teal' : 'red'}>
-                {unrealizedGains >= 0 ? '+' : ''}${unrealizedGains.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </Text>
-            </Paper>
-          </Group>
-        );
-      })()}
+  const totalRealized = strategies.reduce((sum: number, s: any) => sum + (s.trades ? s.trades.reduce((acc: number, t: any) => acc + (t.pnl || 0), 0) : 0), 0);
+  const totalUnrealized = strategies.reduce((sum: number, s: any) => sum + s.lots.reduce((acc: number, l: any) => acc + ((s.latestPrice || l.price) - l.price) * l.shares, 0), 0);
 
-      <Grid>
-        <Grid.Col span={4} visibleFrom="md">
-          <StrategyForm onStrategyCreated={loadStrategies} />
-        </Grid.Col>
+  return (
+    <Container size="xl" py="xl">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+        <div>
+          <Title order={1} style={{ fontWeight: 900, letterSpacing: '-0.02em', background: 'linear-gradient(45deg, #eee, #aaa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+            Linear Engine
+          </Title>
+          <Text c="dimmed" size="sm">Automated position scaling & mean reversion</Text>
+        </div>
+        <NewStrategyModal />
+      </div>
 
-        <Grid.Col span={{ base: 12, md: 8 }}>
-          {loading ? (
-            <Loader color="teal" display="block" mx="auto" mt="xl" />
-          ) : strategies.length === 0 ? (
-            <Text c="dimmed" fs="italic" ta="center" mt="xl">
-              No strategies created yet.{isMobile ? ' Tap + to add one.' : ' Add one from the sidebar.'}
+      <Paper p="md" radius="md" mb="xl" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ display: 'flex', gap: '2rem' }}>
+          <div>
+            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Capital Deployed</Text>
+            <Text fw={700} size="xl">${totalInvested.toLocaleString('en-US', {maximumFractionDigits:0})}</Text>
+          </div>
+          <div>
+            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Capital Configured</Text>
+            <Text fw={700} size="xl">${totalBudget.toLocaleString('en-US', {maximumFractionDigits:0})}</Text>
+          </div>
+          <div>
+            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Realized P&L</Text>
+            <Text fw={700} size="xl" c={totalRealized >= 0 ? 'green' : 'red'}>
+              {totalRealized >= 0 ? '+' : ''}${totalRealized.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
             </Text>
-          ) : (
-            strategies.map(s => (
-              <StrategyCard
-                key={s.id}
-                strategy={s}
-                metrics={metricsMap[s.symbol] ?? null}
-                trades={tradesMap[s.id] ?? []}
-                onUpdate={loadStrategies}
-              />
-            ))
-          )}
-        </Grid.Col>
-      </Grid>
+          </div>
+          <div>
+            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Unrealized P&L</Text>
+            <Text fw={700} size="xl" c={totalUnrealized >= 0 ? 'green' : 'red'}>
+              {totalUnrealized >= 0 ? '+' : ''}${totalUnrealized.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+            </Text>
+          </div>
+        </div>
+      </Paper>
 
-      {/* Mobile: FAB + Drawer for new strategy form */}
-      {isMobile && (
-        <>
-          <ActionIcon
-            color="teal"
-            size={50}
-            radius="xl"
-            variant="filled"
-            onClick={openDrawer}
-            style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 100 }}
-          >
-            <IconPlus size={24} />
-          </ActionIcon>
-          <Drawer opened={drawerOpened} onClose={closeDrawer} title="New Strategy" position="bottom" size="auto">
-            <Box pb="md">
-              <StrategyForm onStrategyCreated={() => { loadStrategies(); closeDrawer(); }} />
-            </Box>
-          </Drawer>
-        </>
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
+        {strategies.map(s => (
+          <LinearStrategyCard key={s.id} strategy={s} />
+        ))}
+      </SimpleGrid>
+      
+      {strategies.length === 0 && (
+        <Paper p="xl" style={{ textAlign: 'center', background: 'transparent' }}>
+          <Text c="dimmed">No strategies configured yet. Click "Add Strategy" to get started.</Text>
+        </Paper>
       )}
     </Container>
   );

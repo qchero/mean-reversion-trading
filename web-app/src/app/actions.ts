@@ -1,7 +1,7 @@
 "use server";
 
 import prisma from '@/lib/prisma';
-import { getOrFetchHistoricalData, calculateStrategyMetrics, getLatestPrice } from '@/lib/polygon';
+import { fetchAndComputeMetrics, getLatestPrice } from '../trading/v2/logic';
 import { revalidatePath } from 'next/cache';
 
 export async function createStrategy(data: {
@@ -19,14 +19,13 @@ export async function createStrategy(data: {
     throw new Error(`A strategy for ${data.symbol.toUpperCase()} already exists.`);
   }
 
-  // Fetch & cache historical data first — if Polygon fails, we won't create a broken strategy
-  await getOrFetchHistoricalData(data.symbol);
+  await fetchAndComputeMetrics(data.symbol);
 
   const strategy = await prisma.strategy.create({
     data,
   });
 
-  revalidatePath('/');
+  revalidatePath('/v1');
   return strategy;
 }
 
@@ -44,10 +43,10 @@ export async function updateStrategy(id: string, data: {
   });
 
   if (data.symbol) {
-    await getOrFetchHistoricalData(data.symbol);
+    await fetchAndComputeMetrics(data.symbol);
   }
   
-  revalidatePath('/');
+  revalidatePath('/v1');
   return strategy;
 }
 
@@ -61,25 +60,12 @@ export async function getStrategyPreviewData(symbol: string) {
   try {
     const normalizedSymbol = symbol.toUpperCase();
 
-    // Compute the latest trading day with finalized data (same logic as polygon.ts)
-    const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const hourET = nowET.getHours();
-    const dayOfWeek = nowET.getDay();
-
-    const expectedEnd = new Date(nowET);
-    expectedEnd.setHours(0, 0, 0, 0);
-
-    if (dayOfWeek === 0) expectedEnd.setDate(expectedEnd.getDate() - 2);        // Sun → Fri
-    else if (dayOfWeek === 6) expectedEnd.setDate(expectedEnd.getDate() - 1);   // Sat → Fri
-    else if (hourET < 17) {
-      if (dayOfWeek === 1) expectedEnd.setDate(expectedEnd.getDate() - 3);      // Mon < 5pm → Fri
-      else expectedEnd.setDate(expectedEnd.getDate() - 1);
-    }
-
-    const year = expectedEnd.getFullYear();
-    const month = String(expectedEnd.getMonth() + 1).padStart(2, '0');
-    const day = String(expectedEnd.getDate()).padStart(2, '0');
-    const expectedDate = `${year}-${month}-${day}`;
+    // Cache is valid if it was updated within the last 1 hour
+    const CACHE_LIFETIME_MS = 60 * 60 * 1000;
+    const isCacheValid = (cached: any) => {
+      if (!cached) return false;
+      return (Date.now() - new Date(cached.updatedAt).getTime()) < CACHE_LIFETIME_MS;
+    };
 
     // Concurrently try fetching the live snapshot
     const defaultSnap = { price: null, dayHigh: null, dayLow: null };
@@ -95,42 +81,47 @@ export async function getStrategyPreviewData(symbol: string) {
       return {
         success: true,
         data: {
+          sma100: cached.sma100,
           sma200: cached.sma200,
+          sma300: cached.sma300,
           dailyVolatility: cached.dailyVolatility,
           latestPrice: snap.price !== null ? snap.price : cached.latestPrice,
           lastDate: cached.lastDate,
           dayHigh: snap.dayHigh,
           dayLow: snap.dayLow,
+          sigma: cached.dailyVolatility // alias for compatibility
         },
       };
     }
 
     // 2. Cache miss — fetch + calculate + upsert
-    const candles = await getOrFetchHistoricalData(normalizedSymbol);
-    if (!candles || candles.length === 0) throw new Error('No candle data available');
-
-    const metrics = calculateStrategyMetrics(candles);
+    const metrics = await fetchAndComputeMetrics(normalizedSymbol);
+    if (!metrics) throw new Error('No metric data available');
     const snap = await snapPromise;
-    const resolvedLatestPrice = snap.price !== null ? snap.price : metrics.latestPrice;
+    const resolvedLatestPrice = snap.price !== null ? snap.price : metrics.lastClose;
 
     await prisma.symbolCache.upsert({
       where: { symbol: normalizedSymbol },
       update: {
         lastDate: metrics.lastDate,
+        sma100: metrics.sma100,
         sma200: metrics.sma200,
-        dailyVolatility: metrics.dailyVolatility,
+        sma300: metrics.sma300,
+        dailyVolatility: metrics.sigma,
         latestPrice: resolvedLatestPrice,
       },
       create: {
         symbol: normalizedSymbol,
         lastDate: metrics.lastDate,
+        sma100: metrics.sma100,
         sma200: metrics.sma200,
-        dailyVolatility: metrics.dailyVolatility,
+        sma300: metrics.sma300,
+        dailyVolatility: metrics.sigma,
         latestPrice: resolvedLatestPrice,
       },
     });
 
-    return { success: true, data: { ...metrics, latestPrice: resolvedLatestPrice, dayHigh: snap.dayHigh, dayLow: snap.dayLow } };
+    return { success: true, data: { ...metrics, dailyVolatility: metrics.sigma, latestPrice: resolvedLatestPrice, dayHigh: snap.dayHigh, dayLow: snap.dayLow } };
   } catch (error: any) {
     return {
       success: false,
@@ -142,19 +133,12 @@ export async function getStrategyPreviewData(symbol: string) {
 export async function getBatchPreviewData(symbols: string[]) {
   const normalized = symbols.map(s => s.toUpperCase());
 
-  // Compute expected trading date once
-  const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const hourET = nowET.getHours();
-  const dayOfWeek = nowET.getDay();
-  const expectedEnd = new Date(nowET);
-  expectedEnd.setHours(0, 0, 0, 0);
-  if (dayOfWeek === 0) expectedEnd.setDate(expectedEnd.getDate() - 2);
-  else if (dayOfWeek === 6) expectedEnd.setDate(expectedEnd.getDate() - 1);
-  else if (hourET < 17) {
-    if (dayOfWeek === 1) expectedEnd.setDate(expectedEnd.getDate() - 3);
-    else expectedEnd.setDate(expectedEnd.getDate() - 1);
-  }
-  const expectedDate = `${expectedEnd.getFullYear()}-${String(expectedEnd.getMonth() + 1).padStart(2, '0')}-${String(expectedEnd.getDate()).padStart(2, '0')}`;
+  // Cache is valid if it was updated within the last 1 hour
+  const CACHE_LIFETIME_MS = 60 * 60 * 1000;
+  const isCacheValid = (cached: any) => {
+    if (!cached) return false;
+    return (Date.now() - new Date(cached.updatedAt).getTime()) < CACHE_LIFETIME_MS;
+  };
 
   // Single DB query for all symbol caches
   const caches = await prisma.symbolCache.findMany({
@@ -169,18 +153,19 @@ export async function getBatchPreviewData(symbols: string[]) {
   );
   const snapMap = new Map(normalized.map((s, i) => [s, snapResults[i] ?? defaultSnap]));
 
-  const results: Record<string, { sma200: number; dailyVolatility: number; latestPrice: number; lastDate: string; dayHigh: number | null; dayLow: number | null }> = {};
+  const results: Record<string, { sma100: number; sma200: number; sma300: number; dailyVolatility: number; latestPrice: number; lastDate: string; dayHigh: number | null; dayLow: number | null }> = {};
 
   // Process each symbol: use cache if fresh, else recalculate
-  // Cache misses run sequentially to avoid exhausting the DB connection pool
-  // (each getOrFetchHistoricalData does a $transaction with ~200 upserts)
+  // (each fetchAndComputeMetrics dynamically checks Yahoo without DB load)
   for (const symbol of normalized) {
     const cached = cacheMap.get(symbol);
     const snap = snapMap.get(symbol) ?? defaultSnap;
 
-    if (cached && cached.lastDate >= expectedDate) {
+    if (isCacheValid(cached)) {
       results[symbol] = {
+        sma100: cached.sma100,
         sma200: cached.sma200,
+        sma300: cached.sma300,
         dailyVolatility: cached.dailyVolatility,
         latestPrice: snap.price !== null ? snap.price : cached.latestPrice,
         lastDate: cached.lastDate,
@@ -192,18 +177,17 @@ export async function getBatchPreviewData(symbols: string[]) {
 
     // Cache miss — fetch + calculate + upsert
     try {
-      const candles = await getOrFetchHistoricalData(symbol);
-      if (!candles || candles.length === 0) continue;
-      const metrics = calculateStrategyMetrics(candles);
-      const resolvedPrice = snap.price !== null ? snap.price : metrics.latestPrice;
+      const metrics = await fetchAndComputeMetrics(symbol);
+      if (!metrics) continue;
+      const resolvedPrice = snap.price !== null ? snap.price : metrics.lastClose;
 
       await prisma.symbolCache.upsert({
         where: { symbol },
-        update: { lastDate: metrics.lastDate, sma200: metrics.sma200, dailyVolatility: metrics.dailyVolatility, latestPrice: resolvedPrice },
-        create: { symbol, lastDate: metrics.lastDate, sma200: metrics.sma200, dailyVolatility: metrics.dailyVolatility, latestPrice: resolvedPrice },
+        update: { lastDate: metrics.lastDate, sma100: metrics.sma100, sma200: metrics.sma200, sma300: metrics.sma300, dailyVolatility: metrics.sigma, latestPrice: resolvedPrice },
+        create: { symbol, lastDate: metrics.lastDate, sma100: metrics.sma100, sma200: metrics.sma200, sma300: metrics.sma300, dailyVolatility: metrics.sigma, latestPrice: resolvedPrice },
       });
 
-      results[symbol] = { ...metrics, latestPrice: resolvedPrice, dayHigh: snap.dayHigh, dayLow: snap.dayLow };
+      results[symbol] = { ...metrics, dailyVolatility: metrics.sigma, latestPrice: resolvedPrice, dayHigh: snap.dayHigh, dayLow: snap.dayLow };
     } catch {
       // skip failed symbols
     }
@@ -216,7 +200,7 @@ export async function deleteStrategy(id: string) {
   await prisma.strategy.delete({
     where: { id }
   });
-  revalidatePath('/');
+  revalidatePath('/v1');
 }
 
 export async function getStrategyTrades(strategyId: string) {
@@ -245,7 +229,7 @@ export async function createTrade(data: {
   buyDate: string;
 }) {
   const trade = await prisma.trade.create({ data });
-  revalidatePath('/');
+  revalidatePath('/v1');
   return trade;
 }
 
@@ -254,13 +238,13 @@ export async function updateTrade(id: string, data: {
   sellDate?: string;
 }) {
   const trade = await prisma.trade.update({ where: { id }, data });
-  revalidatePath('/');
+  revalidatePath('/v1');
   return trade;
 }
 
 export async function deleteTrade(id: string) {
   await prisma.trade.delete({ where: { id } });
-  revalidatePath('/');
+  revalidatePath('/v1');
 }
 
 export async function getStrategyOrders(strategyId: string) {
@@ -279,7 +263,7 @@ export async function deleteOrder(id: string) {
     throw new Error('Cannot delete an active order');
   }
   await prisma.order.delete({ where: { id } });
-  revalidatePath('/');
+  revalidatePath('/v1');
 }
 
 export async function getEngineHeartbeat(): Promise<Date | null> {

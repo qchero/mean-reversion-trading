@@ -15,7 +15,9 @@ import {
 import { Strategy, Order, Trade } from '@prisma/client';
 
 interface Metrics {
+  sma100: number;
   sma200: number;
+  sma300: number;
   dailyVolatility: number;
   latestPrice: number;
   lastDate: string;
@@ -297,11 +299,19 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
       {metrics && (
         <>
           <Grid mt="sm" gutter="xs">
-            <Grid.Col span={{ base: 4, sm: openTrades.length > 0 ? 2 : 4 }}>
+            <Grid.Col span={{ base: 4, sm: 'auto' }}>
               <Text size="xs" c="dimmed">SMA 200</Text>
               <Text fw={600}>${metrics.sma200.toFixed(2)}</Text>
             </Grid.Col>
-            <Grid.Col span={{ base: 4, sm: openTrades.length > 0 ? 2 : 4 }}>
+            <Grid.Col span={{ base: 4, sm: 'auto' }}>
+              <Text size="xs" c="dimmed">SMA 100</Text>
+              <Text fw={600}>${metrics.sma100.toFixed(2)}</Text>
+            </Grid.Col>
+            <Grid.Col span={{ base: 4, sm: 'auto' }}>
+              <Text size="xs" c="dimmed">SMA 300</Text>
+              <Text fw={600}>${metrics.sma300.toFixed(2)}</Text>
+            </Grid.Col>
+            <Grid.Col span={{ base: 4, sm: 'auto' }}>
               <Text size="xs" c="dimmed">Latest Price</Text>
               <Text fw={600} c={metrics.latestPrice < metrics.sma200 ? 'red' : 'teal'}>
                 ${metrics.latestPrice.toFixed(2)}
@@ -312,7 +322,7 @@ export default function StrategyCard({ strategy, metrics: metricsProp, trades: t
                 )}
               </Text>
             </Grid.Col>
-            <Grid.Col span={{ base: 4, sm: openTrades.length > 0 ? 2 : 4 }}>
+            <Grid.Col span={{ base: 4, sm: 'auto' }}>
               <Text size="xs" c="dimmed" visibleFrom="sm">Daily Volatility (σ)</Text>
               <Text size="xs" c="dimmed" hiddenFrom="sm">σ</Text>
               <Text fw={600}>{(metrics.dailyVolatility * 100).toFixed(2)}%</Text>
