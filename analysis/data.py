@@ -121,8 +121,12 @@ def fetch_bars(ticker: str, start: str, end: str) -> pd.DataFrame:
 
         if start_dt < cached_start:
             print(f"  [cache partial] fetching {ticker} pre-range...")
-            pre = _fetch_from_polygon(ticker, start, str(cached_start.date()))
-            parts.append(pre)
+            try:
+                pre = _fetch_from_polygon(ticker, start, str(cached_start.date()))
+                parts.append(pre)
+            except ValueError:
+                print(f"  [cache partial] no pre-range data for {ticker} "
+                      f"(ticker may not have existed before {cached_start.date()})")
 
         if end_dt > cached_end:
             print(f"  [cache partial] fetching {ticker} post-range...")

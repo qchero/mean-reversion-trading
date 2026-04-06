@@ -42,8 +42,8 @@ class Trade:
         return self.buy_price * self.shares
 
 
-def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive daily OHLCV, 200-day SMA, and 200-day daily σ from 15-min bars."""
+def prepare_data(df: pd.DataFrame, sma_period: int = SMA_PERIOD) -> pd.DataFrame:
+    """Derive daily OHLCV, SMA, and rolling daily σ from 15-min bars."""
     daily = df.groupby(df.index.date).agg(
         open=("open", "first"),
         high=("high", "max"),
@@ -52,15 +52,16 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
         volume=("volume", "sum"),
     )
     daily.index = pd.to_datetime(daily.index)
-    daily["sma"] = daily["close"].rolling(window=SMA_PERIOD).mean()
-    daily["sigma"] = daily["close"].pct_change().rolling(window=SMA_PERIOD).std()
+    daily["sma"] = daily["close"].rolling(window=sma_period).mean()
+    daily["sigma"] = daily["close"].pct_change().rolling(window=sma_period).std()
     return daily
 
 
 def simulate(df: pd.DataFrame, daily: pd.DataFrame,
              eval_start_date: str,
              j: float = None, k: float = None,
-             num_levels: int = None, tranche_amount: float = None):
+             num_levels: int = None, tranche_amount: float = None,
+             round_shares: bool = False):
     """Volatility-scaled simulation using daily σ for level spacing.
 
     Levels recalculated each day using previous day's SMA and σ:
@@ -160,7 +161,12 @@ def simulate(df: pd.DataFrame, daily: pd.DataFrame,
                 else:
                     continue
                 level_active[i] = True
-                stack.append(Tranche(i, timestamp, fill, tranche / fill))
+                shares = tranche / fill
+                if round_shares:
+                    shares = int(shares)
+                    if shares == 0:
+                        continue
+                stack.append(Tranche(i, timestamp, fill, shares))
                 action_taken = True
                 break
 

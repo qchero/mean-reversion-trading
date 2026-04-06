@@ -1,11 +1,11 @@
 """Yearly parameter sweep with per-ticker detail.
 
 Finds the parameter combination that maximizes average annualized ROC
-across all calendar years while ensuring >= 24 operations per full year.
+across all calendar years while ensuring >= min-ops operations per full year.
 
 Usage:
-    python sweep_yearly.py --data-start 2021-03-13 --end 2026-03-13
-    python sweep_yearly.py --data-start 2021-03-13 --end 2026-03-13 --min-ops 30
+    python sweep_yearly.py --data-start 2021-03-13 --end 2026-04-01
+    python sweep_yearly.py --data-start 2021-03-13 --end 2026-04-01 --eval-start-year 2024 --min-ops 0 --top 20
 """
 
 import argparse
@@ -22,10 +22,10 @@ from strategy import prepare_data, simulate
 J_VALUES = [4, 5, 6, 7, 8]
 K_VALUES = [0.5, 1, 1.5, 2, 2.5]
 NUM_LEVELS_LIST = [2, 3, 4, 5, 6, 7, 8]
-YEARS = [2022, 2023, 2024, 2025, 2026]
 
 _worker_data = None
 _worker_end_date = None
+_worker_years = None
 
 
 def load_all_data(data_start, end):
@@ -39,10 +39,11 @@ def load_all_data(data_start, end):
     return data
 
 
-def _init_worker(data, end_date):
-    global _worker_data, _worker_end_date
+def _init_worker(data, end_date, years):
+    global _worker_data, _worker_end_date, _worker_years
     _worker_data = data
     _worker_end_date = end_date
+    _worker_years = years
 
 
 def _evaluate_combo(args):
@@ -54,11 +55,12 @@ def _evaluate_combo(args):
     """
     j, k, num_levels = args
     tranche_amount = TOTAL_BUDGET / num_levels
-    eval_start = f"{YEARS[0]}-01-01"
+    eval_start = f"{_worker_years[0]}-01-01"
+    last_year = _worker_years[-1]
 
     # Per-year accumulators
     yearly_agg = {}
-    for year in YEARS:
+    for year in _worker_years:
         yearly_agg[year] = {
             "realized": 0.0, "unrealized": 0.0, "total_pnl": 0.0,
             "closed": 0, "open": 0, "buys": 0, "sells": 0,
@@ -78,10 +80,10 @@ def _evaluate_combo(args):
             tranche_amount=tranche_amount,
         )
 
-        for year in YEARS:
+        for year in _worker_years:
             year_start = pd.Timestamp(f"{year}-01-01")
             year_end = pd.Timestamp(
-                _worker_end_date if year == 2026 else f"{year}-12-31")
+                _worker_end_date if year == last_year else f"{year}-12-31")
 
             # Trades closed (sold) in this year
             year_closed = [t for t in closed_trades
@@ -139,7 +141,7 @@ def _evaluate_combo(args):
             })
 
     # Merge all per-year invested_by_date into overall, sum total_pnl
-    for year in YEARS:
+    for year in _worker_years:
         ya = yearly_agg[year]
         overall_total_pnl += ya["total_pnl"]
         for date, inv in ya["invested_by_date"].items():
@@ -150,14 +152,14 @@ def _evaluate_combo(args):
     overall_avg_deployed = (sum(overall_invested_by_date.values()) / overall_n_days
                             if overall_n_days > 0 else 0)
     # Full-period span in years
-    full_start = pd.Timestamp(f"{YEARS[0]}-01-01")
+    full_start = pd.Timestamp(f"{_worker_years[0]}-01-01")
     full_end = pd.Timestamp(_worker_end_date)
     full_years = (full_end - full_start).days / 365.25
     overall_roc_ann = (overall_total_pnl / overall_avg_deployed / full_years * 100
                        if overall_avg_deployed > 0 and full_years > 0 else 0)
 
     yearly_results = []
-    for year in YEARS:
+    for year in _worker_years:
         ya = yearly_agg[year]
         n_days = len(ya["invested_by_date"])
         avg_deployed = (sum(ya["invested_by_date"].values()) / n_days
@@ -165,7 +167,7 @@ def _evaluate_combo(args):
 
         year_start_ts = pd.Timestamp(f"{year}-01-01")
         year_end_ts = pd.Timestamp(
-            _worker_end_date if year == 2026 else f"{year}-12-31")
+            _worker_end_date if year == last_year else f"{year}-12-31")
         year_frac = (year_end_ts - year_start_ts).days / 365.25
 
         total_pnl = ya["total_pnl"]
@@ -248,10 +250,17 @@ def main():
                         help="Min operations per full year (pro-rated for partial years)")
     parser.add_argument("--output", default="sweep_results_detailed.md",
                         help="Output file for detailed per-ticker results")
+    parser.add_argument("--eval-start-year", type=int, default=2022,
+                        help="First year of evaluation (default: 2022)")
+    parser.add_argument("--top", type=int, default=20,
+                        help="Number of top results to show (default: 20)")
     args = parser.parse_args()
 
+    end_year = int(args.end[:4])
+    years = list(range(args.eval_start_year, end_year + 1))
+
     print(f"Data: {args.data_start} -> {args.end}")
-    print(f"Years: {YEARS}")
+    print(f"Years: {years}")
     print(f"Grid: j={J_VALUES} k={K_VALUES} levels={NUM_LEVELS_LIST}")
     print(f"Min ops/year: {args.min_ops} (pro-rated for partial years)\n")
 
@@ -262,10 +271,10 @@ def main():
     combos = list(itertools.product(J_VALUES, K_VALUES, NUM_LEVELS_LIST))
     n = len(combos)
     ncpu = multiprocessing.cpu_count()
-    print(f"Running {n} combos × {len(YEARS)} years across {ncpu} workers...\n")
+    print(f"Running {n} combos × {len(years)} years across {ncpu} workers...\n")
 
     results = []
-    with multiprocessing.Pool(ncpu, initializer=_init_worker, initargs=(data, args.end)) as pool:
+    with multiprocessing.Pool(ncpu, initializer=_init_worker, initargs=(data, args.end, years)) as pool:
         for i, result in enumerate(pool.imap_unordered(_evaluate_combo, combos)):
             pct = (i + 1) / n * 100
             sys.stdout.write(f"\r  Sweeping ... {i+1}/{n} ({pct:.0f}%)")
@@ -297,11 +306,11 @@ def main():
         print(f"\n{label} ({len(rows)} combos)")
         print(f"{'─'*145}")
         print(f"{'j':>4} {'k':>4} {'Lvls':>4} ", end="")
-        for year in YEARS:
+        for year in years:
             print(f"│ {year:>8} {'Ops':>4} ", end="")
         print(f"│ {'TotP&L':>10} {'AvgDepl':>10} {'ROC/yr':>8}")
         print(f"{'─'*4} {'─'*4} {'─'*4} ", end="")
-        for _ in YEARS:
+        for _ in years:
             print(f"│ {'─'*8} {'─'*4} ", end="")
         print(f"│ {'─'*10} {'─'*10} {'─'*8}")
 
@@ -319,18 +328,20 @@ def main():
     print(f"Ranking by overall ROC = total P&L / avg daily deployed / years × 100")
     print(f"{'='*145}")
 
+    top_n = args.top
+
     if qualified:
-        print_table(qualified[:30], "QUALIFIED (sorted by overall annualized ROC)")
+        print_table(qualified[:top_n + 10], "QUALIFIED (sorted by overall annualized ROC)")
 
     if disqualified:
         print_table(disqualified[:15], "\nDISQUALIFIED (top 15 by overall ROC, shown for reference)")
 
-    # --- Top 10 detailed (stdout) ---
+    # --- Top N detailed (stdout) ---
     show = qualified if qualified else disqualified
     print(f"\n{'='*145}")
-    print(f"TOP 10 {'QUALIFIED ' if qualified else ''}CONFIGURATIONS:")
+    print(f"TOP {top_n} {'QUALIFIED ' if qualified else ''}CONFIGURATIONS:")
     print(f"{'='*145}")
-    for i, r in enumerate(show[:10], 1):
+    for i, r in enumerate(show[:top_n], 1):
         print(f"\n  #{i}: j={r['j']}σ k={r['k']}σ levels={r['levels']} │ "
               f"Total P&L ${r['overall_total_pnl']:+,.0f} │ "
               f"Avg deployed ${r['overall_avg_deployed']:,.0f}/day │ "
@@ -342,7 +353,7 @@ def main():
                   f"Avg deployed ${yr['avg_deployed']:>9,.0f}{flag}")
 
     # Write detailed per-ticker results to markdown
-    write_detailed_md(args.output, show[:10], args.min_ops)
+    write_detailed_md(args.output, show[:top_n], args.min_ops)
     print(f"\nDetailed per-ticker results written to {args.output}")
 
 
