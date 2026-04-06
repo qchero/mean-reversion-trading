@@ -76,7 +76,7 @@ export async function getStrategyPreviewData(symbol: string) {
       where: { symbol: normalizedSymbol },
     });
 
-    if (cached && cached.lastDate >= expectedDate) {
+    if (cached && isCacheValid(cached)) {
       const snap = await snapPromise;
       return {
         success: true,
@@ -161,7 +161,7 @@ export async function getBatchPreviewData(symbols: string[]) {
     const cached = cacheMap.get(symbol);
     const snap = snapMap.get(symbol) ?? defaultSnap;
 
-    if (isCacheValid(cached)) {
+    if (cached && isCacheValid(cached)) {
       results[symbol] = {
         sma100: cached.sma100,
         sma200: cached.sma200,
