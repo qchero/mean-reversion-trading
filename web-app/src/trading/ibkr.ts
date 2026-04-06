@@ -256,6 +256,32 @@ export class IBKRClient {
     return orderId;
   }
 
+  /**
+   * Place a Market on Close (MOC) order. Returns the IBKR order ID.
+   */
+  placeMOCOrder(
+    symbol: string,
+    action: 'BUY' | 'SELL',
+    quantity: number,
+  ): number {
+    const orderId = this.nextOrderId++;
+    const contract = this.stockContract(symbol);
+
+    const order: IBOrder = {
+      action: action === 'BUY' ? OrderAction.BUY : OrderAction.SELL,
+      orderType: OrderType.MOC,
+      totalQuantity: quantity,
+      tif: TimeInForce.DAY,
+      transmit: true,
+    };
+
+    this.ib.placeOrder(orderId, contract, order);
+    console.log(
+      `[IBKR] Placed ${action} MOC order #${orderId}: ${quantity} ${symbol}`,
+    );
+    return orderId;
+  }
+
   cancelOrder(ibkrOrderId: number) {
     this.ib.cancelOrder(ibkrOrderId);
     console.log(`[IBKR] Cancel requested for order #${ibkrOrderId}`);

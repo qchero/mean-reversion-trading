@@ -27,16 +27,19 @@ To avoid spamming brokers with useless micro-transactions (e.g., buying 1 share 
 - *Unclamped Cleanup Boundary:* This guarantees that if price shoots severely out of bounds, residual edge positions (e.g., 1 lone share) are forcefully cleaned up because the mathematical "unclamped" extrapolated intent breaks the trade threshold gap requirement, even though the actual clamped closure bounds limit the executed sale to exactly 1 share.
 - *Consequence:* This organically produces a "grid" of buying and selling points that dynamically spaces out based on the stock's current price. Because it leverages `Math.ceil()` for safety, executions are strictly guaranteed to exceed your dollar minimum requirement.
 
-## 4. Execution Timing & Limit On Close Orders
+## 4. Execution Timing & Order Types
 Because the engine loops continuously, the Web UI natively tracks and evaluates real-time limit threshold states live intraday.
 
 - **Execution Dispatch:** However, actual order placements do not trigger randomly mid-day. The engine waits until exactly **3:45 PM ET** to package all true actionable signals.
-- **Order Structure:** It executes them exclusively as **Limit On Close (LOC)** orders. This specifically traps end-of-day market-on-close pricing dynamics, absorbing final liquidity squeezes while avoiding erratic midday sweeps.
+- **Order Structure:**
+  - **BUY → Market On Close (MOC):** Guarantees fill at the closing auction price. Since we're accumulating at a discount, execution certainty is prioritized over price precision.
+  - **SELL → Limit On Close (LOC):** The limit price is set to `max LIFO cost basis × 1.001` (0.1% premium ≈ bid/ask spread), enforcing the No-Loss Rule (§5) at the close auction. If the closing price is below the limit, the order simply doesn't fill.
 
 ## 5. The Absolute "No-Loss" Rule (LIFO Execution)
 When the mathematical target forces a Sell, the system strictly enforces profitability. It evaluates your actual inventory of stock via *Last In, First Out (LIFO)* sequencing.
 
 - The engine sorts all open lots by `Date` descending.
 - It steps through these lots iteratively until it collects enough shares to satisfy the desired transaction size.
-- **The Blocker:** If the *current price* is lower than the cost basis of *any* lot it intends to offload, the entire aggregate sale is mathematically rejected. 
-- *Safeguard Result:* The UI dynamically traps this failure state, overrides the mathematical "Target Price" required to sell, and replaces it with the "LIFO Cost Basis" price, explicitly labeling it `(LIFO floor)` on the dashboard. The system sits parked without realizing a loss until the underlying basis reaches profitability.
+- **The Gate (LOC Limit Price):** The SELL LOC limit price is set to the *maximum* cost basis among the LIFO lots being sold × 1.001. This means the closing auction must clear above every lot's cost basis for the order to fill. If the close is below this floor, the order expires unfilled — no loss is realized.
+- **Safety Net (Post-Fill Check):** As a belt-and-suspenders guard, the engine also validates at fill time: if the actual fill price is below the cost basis of *any* lot in the LIFO batch, the entire aggregate sale is rejected and lots are left intact.
+- *UI Indicator:* The dashboard dynamically detects when the no-loss rule would block a sell, overrides the mathematical "Target Price" with the "LIFO Cost Basis" price, and labels it `(LIFO floor)`. The system sits parked until the underlying price reaches profitability at close.

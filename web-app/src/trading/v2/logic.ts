@@ -23,8 +23,8 @@ export async function fetchAndComputeMetrics(symbol: string): Promise<LinearData
   };
 
   try {
-    const dataResponse = await yahooFinance.historical(symbol, queryOptions);
-    const data: any[] = dataResponse as any[];
+    const chartResult = await yahooFinance.chart(symbol, queryOptions);
+    const data: any[] = chartResult.quotes;
     if (!data || data.length < 201) {
       console.warn(`[Logic] Not enough historical data for ${symbol} (${data?.length || 0} days found)`);
       return null;
@@ -54,7 +54,7 @@ export async function fetchAndComputeMetrics(symbol: string): Promise<LinearData
 
     // Grab the exact 301 most recent days from pastData
     const recent = pastData.slice(-301);
-    const closes = recent.map(d => d.adjClose ?? d.close); // prefer split/div adjusted
+    const closes = recent.map(d => d.adjclose ?? d.close); // prefer split/div adjusted
 
     // 1. Calculate SMAs (ignoring the oldest day which is only used for the first pct return of sigma)
     const exact300 = closes.slice(1);

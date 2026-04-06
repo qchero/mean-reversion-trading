@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { LinearTradingEngine } from './engine';
 import { IBKRClient } from '../ibkr';
+import { startSimRepl } from './sim-repl';
 
 const args = process.argv.slice(2);
 function getArg(name: string, defaultVal: string): string {
@@ -20,7 +21,8 @@ console.log(`
 ╠══════════════════════════════════════════════╣
 ║  IB Gateway: ${host}:${port}${' '.repeat(Math.max(0, 28 - host.length - String(port).length))}║
 ║  Client ID:  ${clientId}${' '.repeat(Math.max(0, 30 - String(clientId).length))}║
-║  Exec Time:  3:45 PM ET (once daily)         ║
+║  Mode:       ${simulate ? 'SIMULATION (REPL)' : 'LIVE'}${' '.repeat(Math.max(0, simulate ? 24 : 33))}║
+║  Exec Time:  3:40 PM ET (once daily)         ║
 ╚══════════════════════════════════════════════╝
 `);
 
@@ -36,7 +38,11 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-engine.start().catch((err: any) => {
+engine.start().then(() => {
+  if (simulate) {
+    startSimRepl(engine);
+  }
+}).catch((err: any) => {
   console.error('[Engine] Failed to start:', err.message);
   process.exit(1);
 });
