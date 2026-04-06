@@ -2,13 +2,21 @@ import { LinearStrategyCard } from "@/components/LinearStrategyCard";
 import { getLinearStrategies } from "./actions-v2";
 import { Container, Title, SimpleGrid, Paper, Text } from "@mantine/core";
 import { NewStrategyModal } from "@/components/NewStrategyModal";
+import { LogoutButton } from "@/components/LogoutButton";
 import YahooFinance from 'yahoo-finance2';
+import { auth } from "@/auth";
+import { redirect } from "next/navigation";
 const yahooFinance = new YahooFinance();
 
 // Opt out of caching so we see DB state instantly
 export const revalidate = 0;
 
 export default async function V2Dashboard() {
+  const session = await auth();
+  if (!session) {
+    redirect("/api/auth/signin");
+  }
+
   let strategies = await getLinearStrategies();
   
   // Fetch live prices and daily extrema directly from Yahoo Finance on page load
@@ -54,7 +62,10 @@ export default async function V2Dashboard() {
           </Title>
           <Text c="dimmed" size="sm">Automated position scaling & mean reversion</Text>
         </div>
-        <NewStrategyModal />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <NewStrategyModal />
+          <LogoutButton />
+        </div>
       </div>
 
       <Paper p="md" radius="md" mb="xl" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
