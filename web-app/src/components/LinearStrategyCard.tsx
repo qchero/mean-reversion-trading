@@ -64,27 +64,37 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
   let isActionable = Math.abs(unclampedDelta) >= tradeThreshold && sharesDelta !== 0;
   const isBuyPosture = sharesDelta > 0;
 
-  // LIFO Cost Basis Math for Sells
+  // LIFO Cost Basis Math for Sells — skip unprofitable lots, allow partial sells
   let lifoBlockerPrice: number | null = null;
   let isLifoBlocked = false;
+  let isLifoPartial = false;
+  let profitableSellQty = 0;
   if (!isBuyPosture && currentShares > 0) {
-      // If actionable, we intend to sell Math.abs(sharesDelta). If not, we evaluate tradeThreshold.
       const sharesToEvaluateForSell = isActionable ? Math.abs(sharesDelta) : tradeThreshold;
-      const sortedLots = [...strategy.lots].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      
-      let collected = 0;
-      let highestBasis = 0;
-      for (const lot of sortedLots) {
-          if (collected >= sharesToEvaluateForSell) break;
-          if (lot.price > highestBasis) { highestBasis = lot.price; }
-          collected += lot.shares;
-      }
-      lifoBlockerPrice = highestBasis > 0 ? highestBasis : null;
+      // Sort by cost ascending — sell cheapest (most profitable) first
+      const sortedLots = [...strategy.lots].sort((a, b) => a.price - b.price);
 
-      // If actionable mathematically, but the latest price is below the required lot basis, it's blocked.
-      if (isActionable && lifoBlockerPrice !== null && strategy.latestPrice! < lifoBlockerPrice) {
-          isActionable = false;
-          isLifoBlocked = true;
+      let remaining = sharesToEvaluateForSell;
+      let highestProfitableBasis = 0;
+      for (const lot of sortedLots) {
+          if (remaining <= 0) break;
+          if (strategy.latestPrice! < lot.price) break; // ascending — all remaining are worse
+          const take = Math.min(lot.shares, remaining);
+          profitableSellQty += take;
+          highestProfitableBasis = lot.price; // ascending, last taken is max
+          remaining -= take;
+      }
+      lifoBlockerPrice = highestProfitableBasis > 0 ? highestProfitableBasis : null;
+
+      if (isActionable && profitableSellQty < Math.abs(sharesDelta)) {
+          if (profitableSellQty >= tradeThreshold) {
+              // Partial sell: only the profitable lots
+              isLifoPartial = true;
+          } else {
+              // Not enough profitable shares to meet min trade
+              isActionable = false;
+              isLifoBlocked = true;
+          }
       }
   }
 
@@ -305,7 +315,11 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                   <span style={{ color: 'rgba(255,255,255,0.5)', margin: '0 6px' }}>→</span>
                   <span style={{ fontWeight: 800 }}>{isActionable ? targetShares : awaitingShares}</span>
                   <span style={{ color: isActionable ? (sharesDelta > 0 ? '#4caf50' : '#f44336') : 'rgba(255,255,255,0.4)', marginLeft: '8px' }}>
-                    ({isActionable ? `${sharesDelta > 0 ? 'Buy' : 'Sell'} ${Math.abs(sharesDelta)}` : `Awaiting ${awaitingPrice ? '$' + awaitingPrice.toFixed(2) : '--'}${isAwaitingLifoFloor ? ' (LIFO)' : ''}`})
+                    ({isActionable
+                      ? isLifoPartial
+                        ? `Sell ${profitableSellQty} of ${Math.abs(sharesDelta)} (${Math.abs(sharesDelta) - profitableSellQty} LIFO skip)`
+                        : `${sharesDelta > 0 ? 'Buy' : 'Sell'} ${Math.abs(sharesDelta)}`
+                      : `Awaiting ${awaitingPrice ? '$' + awaitingPrice.toFixed(2) : '--'}${isAwaitingLifoFloor ? ' (LIFO)' : ''}`})
                   </span>
                 </>
               ) : (
@@ -342,7 +356,7 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
         </Button>
       </Card>
 
-      <Modal opened={ledgerOpened} onClose={() => setLedgerOpened(false)} title={`${strategy.symbol} Ledger`} size="lg">
+      <Modal opened={ledgerOpened} onClose={() => setLedgerOpened(false)} title={`${strategy.symbol} Ledger`} size="xl">
         <Tabs defaultValue="lots">
           <Tabs.List>
             <Tabs.Tab value="lots">Open Lots ({strategy.lots.length})</Tabs.Tab>
@@ -357,21 +371,58 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Date</Table.Th>
-                    <Table.Th>Price</Table.Th>
-                    <Table.Th>Shares</Table.Th>
-                    <Table.Th>Value</Table.Th>
+                    <Table.Th>Days</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Price</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Shares</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Cost</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Unrealized</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>%</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {strategy.lots.map(lot => (
-                    <Table.Tr key={lot.id}>
-                      <Table.Td>{new Date(lot.createdAt).toLocaleDateString()}</Table.Td>
-                      <Table.Td>${lot.price.toFixed(2)}</Table.Td>
-                      <Table.Td>{lot.shares}</Table.Td>
-                      <Table.Td>${(lot.shares * lot.price).toFixed(2)}</Table.Td>
-                    </Table.Tr>
-                  ))}
+                  {strategy.lots.map(lot => {
+                    const cost = lot.shares * lot.price;
+                    const lotUnrealized = strategy.latestPrice ? (strategy.latestPrice - lot.price) * lot.shares : 0;
+                    const lotUnrealizedPct = strategy.latestPrice ? ((strategy.latestPrice - lot.price) / lot.price) * 100 : 0;
+                    const daysHeld = Math.floor((Date.now() - new Date(lot.createdAt).getTime()) / (1000 * 60 * 60 * 24));
+                    return (
+                      <Table.Tr key={lot.id}>
+                        <Table.Td>{new Date(lot.createdAt).toLocaleDateString()}</Table.Td>
+                        <Table.Td>{daysHeld}</Table.Td>
+                        <Table.Td style={{ textAlign: 'right' }}>${lot.price.toFixed(2)}</Table.Td>
+                        <Table.Td style={{ textAlign: 'right' }}>{lot.shares}</Table.Td>
+                        <Table.Td style={{ textAlign: 'right' }}>${cost.toFixed(2)}</Table.Td>
+                        <Table.Td style={{ textAlign: 'right' }}>
+                          <Text size="sm" fw={600} c={lotUnrealized >= 0 ? 'green' : 'red'} span>
+                            {lotUnrealized >= 0 ? '+' : ''}${lotUnrealized.toFixed(2)}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td style={{ textAlign: 'right' }}>
+                          <Text size="sm" c={lotUnrealizedPct >= 0 ? 'green' : 'red'} span>
+                            {lotUnrealizedPct >= 0 ? '+' : ''}{lotUnrealizedPct.toFixed(1)}%
+                          </Text>
+                        </Table.Td>
+                      </Table.Tr>
+                    );
+                  })}
                 </Table.Tbody>
+                <Table.Tfoot>
+                  <Table.Tr style={{ borderTop: '2px solid rgba(255,255,255,0.15)' }}>
+                    <Table.Td colSpan={3} style={{ fontWeight: 700 }}>Total</Table.Td>
+                    <Table.Td style={{ textAlign: 'right', fontWeight: 700 }}>{currentShares}</Table.Td>
+                    <Table.Td style={{ textAlign: 'right', fontWeight: 700 }}>${invested.toFixed(2)}</Table.Td>
+                    <Table.Td style={{ textAlign: 'right' }}>
+                      <Text size="sm" fw={700} c={unrealizedPnl >= 0 ? 'green' : 'red'} span>
+                        {unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(2)}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td style={{ textAlign: 'right' }}>
+                      <Text size="sm" fw={700} c={unrealizedPnl >= 0 ? 'green' : 'red'} span>
+                        {invested > 0 ? `${unrealizedPnl >= 0 ? '+' : ''}${((unrealizedPnl / invested) * 100).toFixed(1)}%` : '--'}
+                      </Text>
+                    </Table.Td>
+                  </Table.Tr>
+                </Table.Tfoot>
               </Table>
             )}
           </Tabs.Panel>
@@ -385,9 +436,12 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                   <Table.Tr>
                     <Table.Th>Date</Table.Th>
                     <Table.Th>Action</Table.Th>
-                    <Table.Th>Price</Table.Th>
-                    <Table.Th>Shares</Table.Th>
-                    <Table.Th>PnL</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Sigma</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Price</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Shares</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Total</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>Basis</Table.Th>
+                    <Table.Th style={{ textAlign: 'right' }}>PnL</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
@@ -397,11 +451,18 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                       <Table.Td>
                         <Badge color={t.action === 'BUY' ? 'blue' : 'gray'} variant="light">{t.action}</Badge>
                       </Table.Td>
-                      <Table.Td>${t.price.toFixed(2)}</Table.Td>
-                      <Table.Td>{t.shares}</Table.Td>
-                      <Table.Td>
-                        {t.pnl ? (
-                          <Text c={t.pnl >= 0 ? 'green' : 'red'} size="sm" fw={600}>
+                      <Table.Td style={{ textAlign: 'right' }}>
+                        {t.sigmaBelow != null ? `${t.sigmaBelow.toFixed(1)}σ` : '--'}
+                      </Table.Td>
+                      <Table.Td style={{ textAlign: 'right' }}>${t.price.toFixed(2)}</Table.Td>
+                      <Table.Td style={{ textAlign: 'right' }}>{t.shares}</Table.Td>
+                      <Table.Td style={{ textAlign: 'right' }}>${(t.price * t.shares).toFixed(2)}</Table.Td>
+                      <Table.Td style={{ textAlign: 'right' }}>
+                        {t.costBasis != null ? `$${t.costBasis.toFixed(2)}` : '--'}
+                      </Table.Td>
+                      <Table.Td style={{ textAlign: 'right' }}>
+                        {t.pnl != null ? (
+                          <Text c={t.pnl >= 0 ? 'green' : 'red'} size="sm" fw={600} span>
                             {t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}
                           </Text>
                         ) : '--'}
@@ -409,6 +470,16 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                     </Table.Tr>
                   ))}
                 </Table.Tbody>
+                <Table.Tfoot>
+                  <Table.Tr style={{ borderTop: '2px solid rgba(255,255,255,0.15)' }}>
+                    <Table.Td colSpan={7} style={{ fontWeight: 700 }}>Total Realized</Table.Td>
+                    <Table.Td style={{ textAlign: 'right' }}>
+                      <Text size="sm" fw={700} c={realizedPnl >= 0 ? 'green' : 'red'} span>
+                        {realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)}
+                      </Text>
+                    </Table.Td>
+                  </Table.Tr>
+                </Table.Tfoot>
               </Table>
             )}
           </Tabs.Panel>

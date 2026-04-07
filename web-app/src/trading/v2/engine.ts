@@ -62,6 +62,7 @@ export class LinearTradingEngine {
   private static readonly EXECUTION_COOLDOWN_MS = 20 * 60 * 60 * 1000; // 20 hours
   private lastBatchExecutedAt: number | null = null;
   private pendingOrders = new Map<number, PendingContext>();
+  private processedOrders = new Set<number>();
   private tickRunning = false;
 
   private simulate = false;
@@ -126,22 +127,14 @@ export class LinearTradingEngine {
 
     // LIFO cost basis for sell context
     let lifoCostBasis: number | null = null;
+    let sellPlan: { qty: number; limitPrice: number; skippedShares: number } | null = null;
     if (evalResult.action === 'SELL' || evalResult.clampedDiff < 0) {
-      const sortedLots = this.lifoLots(state);
-      let remaining = Math.abs(evalResult.clampedDiff);
-      let totalCost = 0, totalShares = 0;
-      let blocked = false;
-      for (const lot of sortedLots) {
-        if (remaining <= 0) break;
-        const qty = Math.min(lot.shares, remaining);
-        if (price < lot.price) { blocked = true; }
-        totalCost += lot.price * qty;
-        totalShares += qty;
-        remaining -= qty;
-      }
-      lifoCostBasis = totalShares > 0 ? totalCost / totalShares : null;
-      if (blocked) {
-        console.log(`  ⛔ NO-LOSS RULE would BLOCK this sell (LIFO floor: $${lifoCostBasis?.toFixed(2)})`);
+      sellPlan = this.computeSellPlan(state, Math.abs(evalResult.clampedDiff), price, false);
+      lifoCostBasis = sellPlan.limitPrice > 0 ? sellPlan.limitPrice / 1.001 : null;
+      if (sellPlan.qty === 0) {
+        console.log(`  ⛔ NO-LOSS RULE: all lots unprofitable at $${price.toFixed(2)}`);
+      } else if (sellPlan.skippedShares > 0) {
+        console.log(`  ⚠️  Partial sell: ${sellPlan.qty}/${Math.abs(evalResult.clampedDiff)} shares profitable (${sellPlan.skippedShares} skipped)`);
       }
     }
 
@@ -183,16 +176,21 @@ export class LinearTradingEngine {
     }
 
     const { action } = ev.evalResult;
-    const qty = Math.abs(ev.evalResult.clampedDiff);
+    let qty = Math.abs(ev.evalResult.clampedDiff);
 
     let ibkrOrderId: number;
     if (action === 'BUY') {
       console.log(`  [Order] Placing REAL MOC BUY for ${qty} shares of ${symbol}`);
       ibkrOrderId = this.ibkr.placeMOCOrder(symbol, 'BUY', qty);
     } else {
-      const limitPrice = this.computeSellLimitPrice(state, qty);
-      console.log(`  [Order] Placing REAL LOC SELL for ${qty} shares of ${symbol} @ $${limitPrice.toFixed(2)}`);
-      ibkrOrderId = this.ibkr.placeLOCOrder(symbol, 'SELL', qty, limitPrice);
+      const plan = this.computeSellPlan(state, qty, ev.price);
+      if (plan.qty === 0) {
+        console.log(`  [Order] No profitable lots to sell for ${symbol}`);
+        return;
+      }
+      qty = plan.qty;
+      console.log(`  [Order] Placing REAL LOC SELL for ${qty} shares of ${symbol} @ $${plan.limitPrice.toFixed(2)}`);
+      ibkrOrderId = this.ibkr.placeLOCOrder(symbol, 'SELL', qty, plan.limitPrice);
     }
     this.pendingOrders.set(ibkrOrderId, { state, action, evalResult: ev.evalResult, targetPrice: ev.price });
     console.log(`  [Order] ✅ Order ID: ${ibkrOrderId}`);
@@ -306,10 +304,9 @@ export class LinearTradingEngine {
     return { price, currentShares, evalResult };
   }
 
-  private lifoLots(state: StrategyState): LinearLot[] {
-    return [...state.lots].sort((a, b) =>
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+  /** Sort lots by cost ascending — sell cheapest (most profitable) first */
+  private sortedLotsForSell(state: StrategyState): LinearLot[] {
+    return [...state.lots].sort((a, b) => a.price - b.price);
   }
 
   private async persistMetrics(strategyId: string, metrics: LinearData) {
@@ -363,8 +360,14 @@ export class LinearTradingEngine {
       if (evalResult.action === 'BUY') {
         actionStr = `BUY ${Math.abs(evalResult.clampedDiff)}`;
       } else if (evalResult.action === 'SELL') {
-        const limit = this.computeSellLimitPrice(state, Math.abs(evalResult.clampedDiff), false);
-        actionStr = `SELL ${Math.abs(evalResult.clampedDiff)} (limit $${limit.toFixed(2)})`;
+        const plan = this.computeSellPlan(state, Math.abs(evalResult.clampedDiff), price, false);
+        if (plan.qty === 0) {
+          actionStr = `SELL BLOCKED (all ${Math.abs(evalResult.clampedDiff)} lots unprofitable)`;
+        } else if (plan.skippedShares > 0) {
+          actionStr = `SELL ${plan.qty} (limit $${plan.limitPrice.toFixed(2)}, ${plan.skippedShares} skipped)`;
+        } else {
+          actionStr = `SELL ${plan.qty} (limit $${plan.limitPrice.toFixed(2)})`;
+        }
       }
       console.log(`  ${symbol.padEnd(5)} $${price.toFixed(2).padStart(8)} | ${evalResult.sigmaBelow.toFixed(2).padStart(6)}σ | ${String(currentShares).padStart(3)}→${String(evalResult.targetShares).padStart(3)} (${diffStr.padStart(4)}) | ${actionStr}`);
 
@@ -401,45 +404,71 @@ export class LinearTradingEngine {
 
   // ── Order execution ──
 
-  private computeSellLimitPrice(state: StrategyState, qty: number, log = true): number {
-    const sortedLots = this.lifoLots(state);
-    let remaining = qty;
+  /**
+   * Walk lots lowest-cost-first, collecting profitable shares up to targetQty.
+   * Stops at first unprofitable lot (all remaining are more expensive).
+   */
+  private computeSellPlan(state: StrategyState, targetQty: number, currentPrice: number, log = true): { qty: number; limitPrice: number; skippedShares: number } {
+    const sortedLots = this.sortedLotsForSell(state);
+    let remaining = targetQty;
     let maxCostBasis = 0;
+    let profitableQty = 0;
+
     for (const lot of sortedLots) {
       if (remaining <= 0) break;
-      maxCostBasis = Math.max(maxCostBasis, lot.price);
-      remaining -= Math.min(lot.shares, remaining);
+      if (currentPrice < lot.price) break; // sorted ascending — all remaining are worse
+      const take = Math.min(lot.shares, remaining);
+      maxCostBasis = lot.price; // ascending, so last taken is always the max
+      profitableQty += take;
+      remaining -= take;
     }
 
-    const sellLimit = Math.round(maxCostBasis * 1.001 * 100) / 100;
-    if (log) console.log(`[LinearEngine] SELL limit: max lot cost $${maxCostBasis.toFixed(2)} × 1.001 = $${sellLimit.toFixed(2)}`);
-    return sellLimit;
+    const skippedShares = targetQty - profitableQty;
+    const limitPrice = maxCostBasis > 0 ? Math.round(maxCostBasis * 1.001 * 100) / 100 : 0;
+    if (log) console.log(`[LinearEngine] SELL plan: ${profitableQty}/${targetQty} shares profitable (${skippedShares} skipped), limit $${limitPrice.toFixed(2)}`);
+    return { qty: profitableQty, limitPrice, skippedShares };
   }
 
   private async executeTrade(state: StrategyState, price: number, action: 'BUY' | 'SELL', qty: number, evalResult: EvalResult) {
     const symbol = state.strategy.symbol;
 
-    if (!this.simulate) {
-      let ibkrOrderId: number;
-      let targetPrice: number;
-      if (action === 'BUY') {
-        ibkrOrderId = this.ibkr.placeMOCOrder(symbol, action, qty);
-        targetPrice = price;
-        console.log(`[LinearEngine] -> Pending MOC BUY Order ID: ${ibkrOrderId}`);
-      } else {
-        const limitPrice = this.computeSellLimitPrice(state, qty);
-        ibkrOrderId = this.ibkr.placeLOCOrder(symbol, action, qty, limitPrice);
-        targetPrice = limitPrice;
-        console.log(`[LinearEngine] -> Pending LOC SELL Order ID: ${ibkrOrderId}`);
+    if (action === 'SELL') {
+      const plan = this.computeSellPlan(state, qty, price);
+      if (plan.qty === 0) {
+        console.log(`[LinearEngine] ${symbol}: No profitable lots to sell — skipping`);
+        return;
       }
-      this.pendingOrders.set(ibkrOrderId, { state, action, evalResult, targetPrice });
+      const minShares = Math.max(1, Math.ceil(state.strategy.minTradeAmount / price));
+      if (plan.qty < minShares) {
+        console.log(`[LinearEngine] ${symbol}: Profitable qty ${plan.qty} below min trade threshold ${minShares} — skipping`);
+        return;
+      }
+      qty = plan.qty;
+
+      if (!this.simulate) {
+        const ibkrOrderId = this.ibkr.placeLOCOrder(symbol, action, qty, plan.limitPrice);
+        console.log(`[LinearEngine] -> Pending LOC SELL Order ID: ${ibkrOrderId} (${qty} shares @ limit $${plan.limitPrice.toFixed(2)})`);
+        this.pendingOrders.set(ibkrOrderId, { state, action, evalResult, targetPrice: plan.limitPrice });
+      } else {
+        console.log(`[LinearEngine] SIMULATED FILL: SELL ${qty} shares of ${symbol} @ $${plan.limitPrice.toFixed(2)}`);
+        await this.handleOrderFill(
+          { ibkrOrderId: -1, status: 'Filled', filled: qty, remaining: 0, avgFillPrice: plan.limitPrice },
+          { state, action, evalResult, targetPrice: plan.limitPrice }
+        );
+      }
     } else {
-      const fillPrice = action === 'BUY' ? Math.round(price * 100) / 100 : this.computeSellLimitPrice(state, qty);
-      console.log(`[LinearEngine] SIMULATED FULL FILL: ${action} ${qty} shares of ${symbol} @ $${fillPrice.toFixed(2)}`);
-      await this.handleOrderFill(
-        { ibkrOrderId: -1, status: 'Filled', filled: qty, remaining: 0, avgFillPrice: fillPrice },
-        { state, action, evalResult, targetPrice: fillPrice }
-      );
+      if (!this.simulate) {
+        const ibkrOrderId = this.ibkr.placeMOCOrder(symbol, action, qty);
+        console.log(`[LinearEngine] -> Pending MOC BUY Order ID: ${ibkrOrderId}`);
+        this.pendingOrders.set(ibkrOrderId, { state, action, evalResult, targetPrice: price });
+      } else {
+        const fillPrice = Math.round(price * 100) / 100;
+        console.log(`[LinearEngine] SIMULATED FILL: BUY ${qty} shares of ${symbol} @ $${fillPrice.toFixed(2)}`);
+        await this.handleOrderFill(
+          { ibkrOrderId: -1, status: 'Filled', filled: qty, remaining: 0, avgFillPrice: fillPrice },
+          { state, action, evalResult, targetPrice: fillPrice }
+        );
+      }
     }
   }
 
@@ -454,6 +483,13 @@ export class LinearTradingEngine {
     const isTerminal = fill.status === 'Filled' || fill.status === 'Cancelled' || fill.status === 'Inactive';
     if (!hasFills || !isTerminal) return;
     if (!ctx) return;
+
+    // Dedup: IBKR fires Filled callbacks multiple times for the same order
+    if (!simulateCtx && this.processedOrders.has(fill.ibkrOrderId)) {
+      console.log(`[LinearEngine] Order #${fill.ibkrOrderId} already processed — ignoring duplicate fill`);
+      return;
+    }
+    if (!simulateCtx) this.processedOrders.add(fill.ibkrOrderId);
 
     const { state, action, evalResult } = ctx;
     const fillPrice = fill.avgFillPrice > 0 ? fill.avgFillPrice : ctx.targetPrice;
@@ -474,28 +510,24 @@ export class LinearTradingEngine {
         }
       });
     } else if (action === 'SELL') {
-      const sortedLots = this.lifoLots(state);
+      const sortedLots = this.sortedLotsForSell(state);
 
-      // Phase 1: Pre-scan — if ANY LIFO lot is unprofitable, reject entire sale (spec §5)
+      // Phase 1: Walk lots lowest-cost-first, stop at first unprofitable lot
       let remaining = qty;
       const plan: { lot: LinearLot; sellQty: number }[] = [];
 
       for (const lot of sortedLots) {
         if (remaining <= 0) break;
-
         if (fillPrice < lot.price) {
-          console.log(`[LinearEngine] NO-LOSS RULE: ENTIRE sell of ${qty} shares REJECTED. ` +
-            `Fill $${fillPrice.toFixed(2)} < Lot cost $${lot.price.toFixed(2)} (date: ${lot.date})`);
-          plan.length = 0;
+          console.log(`[LinearEngine] NO-LOSS STOP: lot @ $${lot.price.toFixed(2)} (fill $${fillPrice.toFixed(2)}) — remaining ${remaining} shares not sold`);
           break;
         }
-
-        const sellQty = Math.min(lot.shares, remaining);
-        plan.push({ lot, sellQty });
-        remaining -= sellQty;
+        const take = Math.min(lot.shares, remaining);
+        plan.push({ lot, sellQty: take });
+        remaining -= take;
       }
 
-      // Phase 2: Execute only if every lot passed
+      // Phase 2: Execute profitable lots
       if (plan.length > 0) {
         let sellPnl = 0;
         let sellCostBasis = 0;
