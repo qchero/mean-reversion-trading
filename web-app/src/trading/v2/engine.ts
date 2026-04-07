@@ -369,7 +369,8 @@ export class LinearTradingEngine {
           actionStr = `SELL ${plan.qty} (limit $${plan.limitPrice.toFixed(2)})`;
         }
       }
-      console.log(`  ${symbol.padEnd(5)} $${price.toFixed(2).padStart(8)} | ${evalResult.sigmaBelow.toFixed(2).padStart(6)}σ | ${String(currentShares).padStart(3)}→${String(evalResult.targetShares).padStart(3)} (${diffStr.padStart(4)}) | ${actionStr}`);
+      const unclampedStr = evalResult.unclampedTargetShares !== evalResult.targetShares ? ` [unc ${evalResult.unclampedTargetShares}]` : '';
+      console.log(`  ${symbol.padEnd(5)} $${price.toFixed(2).padStart(8)} | ${evalResult.sigmaBelow.toFixed(2).padStart(6)}σ | ${String(currentShares).padStart(3)}→${String(evalResult.targetShares).padStart(3)} (${diffStr.padStart(4)})${unclampedStr} | ${actionStr}`);
 
       if (evalResult.action) {
         actionable.push({ state, price, evalResult });

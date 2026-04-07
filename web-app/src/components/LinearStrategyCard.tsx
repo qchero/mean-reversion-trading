@@ -314,6 +314,9 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                 <>
                   <span style={{ color: 'rgba(255,255,255,0.5)', margin: '0 6px' }}>→</span>
                   <span style={{ fontWeight: 800 }}>{isActionable ? targetShares : awaitingShares}</span>
+                  {isActionable && Math.abs(sharesDelta) < tradeThreshold && Math.abs(unclampedDelta) >= tradeThreshold && (
+                    <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: '11px', marginLeft: '4px' }}>[unc {unclampedTargetShares}]</span>
+                  )}
                   <span style={{ color: isActionable ? (sharesDelta > 0 ? '#4caf50' : '#f44336') : 'rgba(255,255,255,0.4)', marginLeft: '8px' }}>
                     ({isActionable
                       ? isLifoPartial

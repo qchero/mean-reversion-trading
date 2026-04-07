@@ -95,10 +95,11 @@ export function evaluateLinearTarget(
   maxBudget: number,
   minTradeAmount: number,
   currentShares: number
-): { 
-  action: 'BUY' | 'SELL' | null; 
-  targetShares: number; 
-  clampedDiff: number; 
+): {
+  action: 'BUY' | 'SELL' | null;
+  targetShares: number;
+  unclampedTargetShares: number;
+  clampedDiff: number;
   unclampedDiff: number;
   sigmaBelow: number;
   targetValue: number;
@@ -130,6 +131,7 @@ export function evaluateLinearTarget(
   return {
     action,
     targetShares,
+    unclampedTargetShares,
     clampedDiff: diff,
     unclampedDiff,
     sigmaBelow,
