@@ -41,8 +41,9 @@ export async function fetchAndComputeMetrics(symbol: string): Promise<LinearData
     // Sort chronologically just in case, though yahoo-finance2 does.
     data.sort((a, b) => a.date.getTime() - b.date.getTime());
 
-    // Filter out today
+    // Filter out today and any entries with null close (e.g. incomplete intraday candles)
     const pastData = data.filter(d => {
+      if ((d.adjclose ?? d.close) == null) return false;
       const dStr = `${d.date.getFullYear()}-${String(d.date.getMonth() + 1).padStart(2, '0')}-${String(d.date.getDate()).padStart(2, '0')}`;
       return dStr < todayStr;
     });

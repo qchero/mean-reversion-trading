@@ -2,6 +2,7 @@
 
 import prisma from '@/lib/prisma';
 import { revalidatePath } from 'next/cache';
+import { fetchAndComputeMetrics, getLatestPrice } from '@/trading/v2/logic';
 
 export async function createLinearStrategy(data: {
   symbol: string;
@@ -17,12 +18,30 @@ export async function createLinearStrategy(data: {
     throw new Error(`A strategy for ${data.symbol.toUpperCase()} already exists.`);
   }
 
+  const symbol = data.symbol.toUpperCase();
+
   const strategy = await prisma.linearStrategy.create({
     data: {
       ...data,
-      symbol: data.symbol.toUpperCase(),
+      symbol,
     },
   });
+
+  // Fetch initial metrics and price so the card isn't empty
+  const [metrics, priceSnap] = await Promise.all([
+    fetchAndComputeMetrics(symbol),
+    getLatestPrice(symbol),
+  ]);
+
+  if (metrics || priceSnap.price) {
+    await prisma.linearStrategy.update({
+      where: { id: strategy.id },
+      data: {
+        ...(metrics && { sma100: metrics.sma100, sma200: metrics.sma200, sma300: metrics.sma300, dailyVolatility: metrics.sigma }),
+        ...(priceSnap.price && { latestPrice: priceSnap.price, latestPriceAt: new Date() }),
+      },
+    });
+  }
 
   revalidatePath('/');
   return strategy;

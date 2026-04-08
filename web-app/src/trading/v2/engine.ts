@@ -222,7 +222,6 @@ export class LinearTradingEngine {
   async loadStrategies() {
     try {
       const strategies = await prisma.linearStrategy.findMany({
-        where: { autoExecute: true },
         include: { lots: true },
       });
 
@@ -316,6 +315,22 @@ export class LinearTradingEngine {
     }).catch(() => {});
   }
 
+  /** Batch-write all latestPrice values to DB (called every tick loop, ~60s) */
+  private async persistPrices() {
+    const updates = [];
+    for (const [, state] of this.strategies) {
+      if (state.strategy.latestPrice) {
+        updates.push(
+          prisma.linearStrategy.update({
+            where: { id: state.strategy.id },
+            data: { latestPrice: state.strategy.latestPrice, latestPriceAt: state.strategy.latestPriceAt },
+          }).catch(() => {})
+        );
+      }
+    }
+    await Promise.all(updates);
+  }
+
   private handleTick(tick: MarketTick) {
     const state = this.strategies.get(tick.symbol);
     if (!state) return;
@@ -348,6 +363,8 @@ export class LinearTradingEngine {
 
     console.log(`\n[${timestamp()}]`);
     for (const [symbol, state] of this.strategies) {
+      if (!state.strategy.autoExecute) continue;
+
       const ev = this.evaluateState(state);
       if (!ev) {
         console.log(`  ${symbol.padEnd(5)} — awaiting price`);
@@ -376,6 +393,9 @@ export class LinearTradingEngine {
         actionable.push({ state, price, evalResult });
       }
     }
+
+    // ── Persist latest prices to DB so the UI stays in sync ──
+    await this.persistPrices();
 
     // ── Execute: place orders at >= 15:45 ET (once per day via cooldown) ──
     if (this.lastBatchExecutedAt &&

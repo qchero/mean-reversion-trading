@@ -35,7 +35,7 @@ export function NewStrategyModal() {
         minTradeAmount: form.minTradeAmount,
       });
       setOpened(false);
-      setForm({ symbol: "", bandLo: 6, bandHi: 14, maxBudget: 75000, minTradeAmount: 5000 });
+      setForm({ symbol: "", bandLo: 6, bandHi: 14, maxBudget: 30000, minTradeAmount: 2000 });
     } catch (err: any) {
       setError(err.message || "Failed to create strategy");
     } finally {
