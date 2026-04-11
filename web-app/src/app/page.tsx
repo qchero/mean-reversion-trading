@@ -1,8 +1,9 @@
 import { LinearStrategyCard } from "@/components/LinearStrategyCard";
-import { getLinearStrategies } from "./actions-v2";
+import { getLinearStrategies, getEngineHeartbeatV2 } from "./actions-v2";
 import { Container, Title, SimpleGrid, Paper, Text } from "@mantine/core";
 import { NewStrategyModal } from "@/components/NewStrategyModal";
 import { LogoutButton } from "@/components/LogoutButton";
+import { EngineStatus } from "@/components/EngineStatus";
 import { auth } from "@/auth";
 import { redirect } from "next/navigation";
 
@@ -15,7 +16,10 @@ export default async function V2Dashboard() {
     redirect("/api/auth/signin");
   }
 
-  const strategies = await getLinearStrategies();
+  const [strategies, heartbeat] = await Promise.all([
+    getLinearStrategies(),
+    getEngineHeartbeatV2(),
+  ]);
   
   const totalInvested = strategies.reduce((sum: number, s: any) => sum + s.lots.reduce((acc: number, lot: any) => acc + lot.shares * lot.price, 0), 0);
   const totalBudget = strategies.reduce((sum: number, s: any) => sum + s.maxBudget, 0);
@@ -33,6 +37,7 @@ export default async function V2Dashboard() {
           <Text c="dimmed" size="sm">Automated position scaling & mean reversion</Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <EngineStatus heartbeat={heartbeat} />
           <NewStrategyModal />
           <LogoutButton />
         </div>

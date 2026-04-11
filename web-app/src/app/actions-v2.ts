@@ -96,6 +96,7 @@ export async function deleteLinearStrategy(id: string) {
   revalidatePath('/');
 }
 
-// Data fetching for metrics happens continuously in the engine and maybe logged to UI 
-// if we implement TRPC/SSE, but for static Next.js UI we'll just show the latest db state.
-// We might need an endpoint to fetch the latest evaluateTick results later.
+export async function getEngineHeartbeatV2(): Promise<Date | null> {
+  const row = await prisma.engineHeartbeat.findUnique({ where: { id: 'singleton' } });
+  return row?.timestamp ?? null;
+}

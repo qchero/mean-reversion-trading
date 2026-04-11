@@ -22,7 +22,7 @@ console.log(`
 ║  IB Gateway: ${host}:${port}${' '.repeat(Math.max(0, 28 - host.length - String(port).length))}║
 ║  Client ID:  ${clientId}${' '.repeat(Math.max(0, 30 - String(clientId).length))}║
 ║  Mode:       ${simulate ? 'SIMULATION (REPL)' : 'LIVE'}${' '.repeat(Math.max(0, simulate ? 24 : 33))}║
-║  Exec Time:  3:40 PM ET (once daily)         ║
+║  Exec Time:  3:48 PM ET (once daily)         ║
 ╚══════════════════════════════════════════════╝
 `);
 

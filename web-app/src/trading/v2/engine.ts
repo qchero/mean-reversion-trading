@@ -7,7 +7,7 @@ const STRATEGY_RELOAD_MS = 60 * 1000;
 
 // The exact minute of the day to execute real trades (15:45 ET)
 const EXEC_HOUR = 15;
-const EXEC_MINUTE = 40;
+const EXEC_MINUTE = 48;
 
 type EvalResult = ReturnType<typeof evaluateLinearTarget>;
 
@@ -394,8 +394,15 @@ export class LinearTradingEngine {
       }
     }
 
-    // ── Persist latest prices to DB so the UI stays in sync ──
-    await this.persistPrices();
+    // ── Persist latest prices + heartbeat to DB so the UI stays in sync ──
+    await Promise.all([
+      this.persistPrices(),
+      prisma.engineHeartbeat.upsert({
+        where: { id: 'singleton' },
+        update: { timestamp: new Date() },
+        create: { id: 'singleton', timestamp: new Date() },
+      }).catch(() => {}),
+    ]);
 
     // ── Execute: place orders at >= 15:45 ET (once per day via cooldown) ──
     if (this.lastBatchExecutedAt &&

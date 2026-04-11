@@ -125,7 +125,10 @@ export function evaluateLinearTarget(
   const satisfiesMinTrade = Math.abs(unclampedDiff) >= Math.max(1, minShares);
 
   let action: 'BUY' | 'SELL' | null = null;
-  if (diff !== 0 && satisfiesMinTrade) {
+  // Only act when clamped and unclamped agree on direction — prevents
+  // budget-cap rounding from triggering sells when unclamped wants to buy
+  const sameDirection = (diff > 0 && unclampedDiff > 0) || (diff < 0 && unclampedDiff < 0);
+  if (diff !== 0 && satisfiesMinTrade && sameDirection) {
     action = diff > 0 ? 'BUY' : 'SELL';
   }
 
