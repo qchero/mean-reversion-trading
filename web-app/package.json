@@ -30,6 +30,7 @@
     "prisma": "^6.19.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "recharts": "^3.8.1",
     "tsx": "^4.21.0",
     "yahoo-finance2": "^3.14.0"
   },

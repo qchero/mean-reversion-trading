@@ -10,14 +10,14 @@ export function EngineStatus({ heartbeat }: { heartbeat: Date | null }) {
     return () => clearInterval(interval);
   }, []);
 
-  if (!heartbeat) return <Badge variant="dot" color="gray" size="sm">Engine: offline</Badge>;
+  if (!heartbeat) return <Badge variant="dot" color="gray" size="sm" style={{ flexShrink: 0 }}>Engine: offline</Badge>;
 
   const agoSec = Math.floor((Date.now() - new Date(heartbeat).getTime()) / 1000);
   const label = agoSec < 60 ? `${agoSec}s ago` : `${Math.floor(agoSec / 60)}m ago`;
   const alive = agoSec < 120;
 
   return (
-    <Badge variant="dot" color={alive ? "green" : "red"} size="sm">
+    <Badge variant="dot" color={alive ? "green" : "red"} size="sm" style={{ flexShrink: 0 }}>
       Engine: {label}
     </Badge>
   );
