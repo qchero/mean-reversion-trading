@@ -41,7 +41,7 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
     ? (strategy.sma200 - strategy.latestPrice) / (strategy.sma200 * strategy.dailyVolatility)
     : 0;
 
-  // Target Shares Math
+  // Target Shares Math — mirrors logic.ts evaluateLinearTarget exactly
   let targetShares = 0;
   let unclampedTargetShares = 0;
   if (strategy.latestPrice) {
@@ -49,20 +49,14 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
     const linearTargetValue = strategy.maxBudget * progress;
     unclampedTargetShares = Math.round(linearTargetValue / strategy.latestPrice);
 
-    if (currentSigma >= strategy.bandHi) {
-      targetShares = Math.round(strategy.maxBudget / strategy.latestPrice);
-    } else if (currentSigma <= strategy.bandLo) {
-      targetShares = 0;
-    } else {
-      targetShares = unclampedTargetShares;
-    }
+    const maxShares = Math.round(strategy.maxBudget / strategy.latestPrice);
+    targetShares = Math.max(0, Math.min(maxShares, unclampedTargetShares));
   }
 
   const sharesDelta = targetShares - currentShares;
   const unclampedDelta = unclampedTargetShares - currentShares;
   const tradeThreshold = strategy.latestPrice ? Math.max(1, Math.ceil(strategy.minTradeAmount / strategy.latestPrice)) : 0;
-  const sameDirection = (sharesDelta > 0 && unclampedDelta > 0) || (sharesDelta < 0 && unclampedDelta < 0);
-  let isActionable = Math.abs(unclampedDelta) >= tradeThreshold && sharesDelta !== 0 && sameDirection;
+  let isActionable = (Math.abs(sharesDelta) >= tradeThreshold || Math.abs(unclampedDelta) >= tradeThreshold) && sharesDelta !== 0;
   const isBuyPosture = sharesDelta > 0;
 
   // LIFO Cost Basis Math for Sells — skip unprofitable lots, allow partial sells

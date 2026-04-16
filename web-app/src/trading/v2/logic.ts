@@ -120,15 +120,15 @@ export function evaluateLinearTarget(
 
   const targetValue = targetShares * price;
 
-  // Step 4: Gate check
+  // Step 4: Gate check — use diff against min threshold, but fall back to
+  // unclampedDiff when budget cap or near-zero position makes diff too small
   const minShares = minTradeAmount > 0 ? Math.ceil(minTradeAmount / price) : 1;
-  const satisfiesMinTrade = Math.abs(unclampedDiff) >= Math.max(1, minShares);
+  const minGate = Math.max(1, minShares);
+  const satisfiesMinTrade = Math.abs(diff) >= minGate
+    || Math.abs(unclampedDiff) >= minGate;
 
   let action: 'BUY' | 'SELL' | null = null;
-  // Only act when clamped and unclamped agree on direction — prevents
-  // budget-cap rounding from triggering sells when unclamped wants to buy
-  const sameDirection = (diff > 0 && unclampedDiff > 0) || (diff < 0 && unclampedDiff < 0);
-  if (diff !== 0 && satisfiesMinTrade && sameDirection) {
+  if (diff !== 0 && satisfiesMinTrade) {
     action = diff > 0 ? 'BUY' : 'SELL';
   }
 

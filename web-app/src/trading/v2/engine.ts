@@ -466,11 +466,6 @@ export class LinearTradingEngine {
         console.log(`[LinearEngine] ${symbol}: No profitable lots to sell — skipping`);
         return;
       }
-      const minShares = Math.max(1, Math.ceil(state.strategy.minTradeAmount / price));
-      if (plan.qty < minShares) {
-        console.log(`[LinearEngine] ${symbol}: Profitable qty ${plan.qty} below min trade threshold ${minShares} — skipping`);
-        return;
-      }
       qty = plan.qty;
 
       if (!this.simulate) {
