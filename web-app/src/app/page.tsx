@@ -4,7 +4,7 @@ import { Container, Title, SimpleGrid, Paper, Text } from "@mantine/core";
 import { NewStrategyModal } from "@/components/NewStrategyModal";
 import { LogoutButton } from "@/components/LogoutButton";
 import { EngineStatus } from "@/components/EngineStatus";
-import { DailyChartToggle } from "@/components/DailyChart";
+import { DailyChart } from "@/components/DailyChart";
 import { auth } from "@/auth";
 import { redirect } from "next/navigation";
 
@@ -22,10 +22,6 @@ export default async function V2Dashboard() {
     getEngineHeartbeatV2(),
   ]);
   
-  const totalInvested = strategies.reduce((sum: number, s: any) => sum + s.lots.reduce((acc: number, lot: any) => acc + lot.shares * lot.price, 0), 0);
-  const totalBudget = strategies.reduce((sum: number, s: any) => sum + s.maxBudget, 0);
-
-  const totalRealized = strategies.reduce((sum: number, s: any) => sum + (s.trades ? s.trades.reduce((acc: number, t: any) => acc + (t.pnl || 0), 0) : 0), 0);
   const totalUnrealized = strategies.reduce((sum: number, s: any) => sum + s.lots.reduce((acc: number, l: any) => acc + ((s.latestPrice || l.price) - l.price) * l.shares, 0), 0);
 
   // Average Capital Deployed: replay ALL strategies on a single shared timeline
@@ -51,10 +47,11 @@ export default async function V2Dashboard() {
 
   let totalCapitalDays = 0;
   let totalDays = 0;
-  const dailySnapshots: { date: string; capitalDeployed: number; realizedPnl: number }[] = [];
+  const dailySnapshots: { date: string; capitalDeployed: number; realizedPnl: number; marginInterest: number }[] = [];
   if (globalFirstDate) {
     const stratLots: { shares: number; price: number }[][] = strategies.map(() => []);
     let cumulativeRealizedPnl = 0;
+    let cumulativeMarginInterest = 0;
     let d = new Date(globalFirstDate + 'T12:00:00');
     const end = new Date(todayStr + 'T12:00:00');
     while (d <= end) {
@@ -78,10 +75,12 @@ export default async function V2Dashboard() {
         }
         dayCapital += stratLots[i].reduce((acc, l) => acc + l.shares * l.price, 0);
       }
+      cumulativeMarginInterest += dayCapital * 0.05 / 360;
       dailySnapshots.push({
         date: dateStr,
         capitalDeployed: Math.round(dayCapital),
         realizedPnl: Math.round(cumulativeRealizedPnl * 100) / 100,
+        marginInterest: Math.round(cumulativeMarginInterest * 100) / 100,
       });
       totalCapitalDays += dayCapital;
       totalDays++;
@@ -106,37 +105,12 @@ export default async function V2Dashboard() {
         </div>
       </div>
 
-      <Paper p="md" radius="md" mb="xl" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
-        <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-          <div>
-            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Capital Deployed</Text>
-            <Text fw={700} size="xl">${totalInvested.toLocaleString('en-US', {maximumFractionDigits:0})}</Text>
-          </div>
-          <div>
-            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Avg Capital Deployed</Text>
-            <Text fw={700} size="xl">${avgCapitalDeployed.toLocaleString('en-US', {maximumFractionDigits:0})}</Text>
-            {totalDays > 0 && <Text c="dimmed" size="xs">{totalDays} days</Text>}
-          </div>
-          <div>
-            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Total Capital Configured</Text>
-            <Text fw={700} size="xl">${totalBudget.toLocaleString('en-US', {maximumFractionDigits:0})}</Text>
-          </div>
-          <div>
-            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Realized P&L</Text>
-            <Text fw={700} size="xl" c={totalRealized >= 0 ? 'green' : 'red'}>
-              {totalRealized >= 0 ? '+' : ''}${totalRealized.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-            </Text>
-          </div>
-          <div>
-            <Text c="dimmed" size="xs" tt="uppercase" fw={700}>Unrealized P&L</Text>
-            <Text fw={700} size="xl" c={totalUnrealized >= 0 ? 'green' : 'red'}>
-              {totalUnrealized >= 0 ? '+' : ''}${totalUnrealized.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-            </Text>
-          </div>
-        </div>
-      </Paper>
-
-      {dailySnapshots.length > 0 && <DailyChartToggle data={dailySnapshots} />}
+      {dailySnapshots.length > 0 && (
+        <Paper p="xs" radius="md" mb="xl" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <Text c="dimmed" size="xs" tt="uppercase" fw={700} ta="center" mt={4}>Capital Deployed & P&L</Text>
+          <DailyChart data={dailySnapshots} avgCapitalDeployed={Math.round(avgCapitalDeployed)} unrealizedPnl={Math.round(totalUnrealized * 100) / 100} />
+        </Paper>
+      )}
 
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
         {strategies.map(s => (

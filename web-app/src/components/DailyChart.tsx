@@ -1,42 +1,31 @@
 "use client";
 
-import { useState } from "react";
-import { Paper, Text, UnstyledButton } from "@mantine/core";
 import {
   ResponsiveContainer,
   ComposedChart,
   Area,
   Line,
+  Scatter,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   Legend,
+  ReferenceLine,
 } from "recharts";
 
-type Snapshot = { date: string; capitalDeployed: number; realizedPnl: number };
+type Snapshot = { date: string; capitalDeployed: number; realizedPnl: number; marginInterest: number; unrealizedPnl?: number };
 
-export function DailyChartToggle({ data }: { data: Snapshot[] }) {
-  const [open, setOpen] = useState(false);
-  if (data.length === 0) return null;
-
-  return (
-    <Paper p="md" radius="md" mb="xl" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
-      <UnstyledButton onClick={() => setOpen(!open)} style={{ width: '100%' }}>
-        <Text c="dimmed" size="xs" tt="uppercase" fw={700}>
-          {open ? '▾' : '▸'} Daily Capital Deployed & Realized P&L
-        </Text>
-      </UnstyledButton>
-      {open && (
-        <div style={{ marginTop: 12, width: '100%' }}>
-          <DailyChart data={data} />
-        </div>
-      )}
-    </Paper>
-  );
+interface ChartProps {
+  data: Snapshot[];
+  avgCapitalDeployed?: number;
+  unrealizedPnl?: number;
 }
 
-export function DailyChart({ data }: { data: Snapshot[] }) {
+const formatDollar = (v: number) =>
+  `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+
+export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartProps) {
   if (data.length === 0) return null;
 
   const formatDate = (d: string) => {
@@ -44,12 +33,15 @@ export function DailyChart({ data }: { data: Snapshot[] }) {
     return `${parseInt(m)}/${parseInt(day)}`;
   };
 
-  const formatDollar = (v: number) =>
-    `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  const chartData = data.map((d, i) =>
+    i === data.length - 1 && unrealizedPnl != null
+      ? { ...d, unrealizedPnl }
+      : d
+  );
 
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <ComposedChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+      <ComposedChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
         <XAxis
           dataKey="date"
@@ -62,7 +54,7 @@ export function DailyChart({ data }: { data: Snapshot[] }) {
           tickFormatter={formatDollar}
           tick={{ fill: "#888", fontSize: 11 }}
           axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
-          width={80}
+          width={72}
         />
         <YAxis
           yAxisId="right"
@@ -70,7 +62,7 @@ export function DailyChart({ data }: { data: Snapshot[] }) {
           tickFormatter={formatDollar}
           tick={{ fill: "#888", fontSize: 11 }}
           axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
-          width={80}
+          width={72}
         />
         <Tooltip
           contentStyle={{
@@ -80,14 +72,25 @@ export function DailyChart({ data }: { data: Snapshot[] }) {
             fontSize: 12,
           }}
           labelFormatter={(label) => formatDate(String(label))}
-          formatter={(value, name) => [
-            formatDollar(Number(value)),
-            String(name),
-          ]}
+          formatter={(value, name) => {
+            const num = Number(value);
+            if (isNaN(num)) return [null, null];
+            return [formatDollar(num), String(name)];
+          }}
         />
         <Legend
           wrapperStyle={{ fontSize: 12, color: "#aaa" }}
         />
+        {avgCapitalDeployed != null && (
+          <ReferenceLine
+            yAxisId="left"
+            y={avgCapitalDeployed}
+            stroke="#4dabf7"
+            strokeDasharray="6 4"
+            strokeOpacity={0.5}
+            label={{ value: `Avg: ${formatDollar(avgCapitalDeployed)}`, fill: '#4dabf7', fontSize: 10, position: 'insideTopLeft' }}
+          />
+        )}
         <Area
           yAxisId="left"
           type="stepAfter"
@@ -105,6 +108,23 @@ export function DailyChart({ data }: { data: Snapshot[] }) {
           stroke="#51cf66"
           strokeWidth={2}
           dot={false}
+        />
+        <Line
+          yAxisId="right"
+          type="stepAfter"
+          dataKey="marginInterest"
+          name="Margin Interest"
+          stroke="#ff6b6b"
+          strokeWidth={2}
+          dot={false}
+        />
+        <Scatter
+          yAxisId="right"
+          dataKey="unrealizedPnl"
+          name="Unrealized P&L"
+          fill="#da77f2"
+          shape="diamond"
+          legendType="diamond"
         />
       </ComposedChart>
     </ResponsiveContainer>
