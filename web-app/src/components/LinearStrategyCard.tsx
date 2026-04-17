@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { LinearStrategy, LinearLot } from "@prisma/client";
 import { Card, Text, Group, Switch, Badge, Progress, Button, Modal, NumberInput, ActionIcon, Stack, Tabs, Table } from "@mantine/core";
-import { IconSettings, IconTrash, IconListDetails } from "@tabler/icons-react";
+import { IconSettings, IconTrash, IconListDetails, IconChartLine } from "@tabler/icons-react";
 import { updateLinearStrategy, deleteLinearStrategy } from "@/app/actions-v2";
 
 type StrategyWithLots = LinearStrategy & { lots: LinearLot[], trades: any[] };
@@ -11,6 +11,8 @@ type StrategyWithLots = LinearStrategy & { lots: LinearLot[], trades: any[] };
 export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots }) {
   const [opened, setOpened] = useState(false);
   const [ledgerOpened, setLedgerOpened] = useState(false);
+  const [exploreOpened, setExploreOpened] = useState(false);
+  const [exploreSigma, setExploreSigma] = useState<number>(0);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -343,16 +345,25 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
           </Group>
         </div>
 
-        <Button 
-          variant="light" 
-          color="gray" 
-          fullWidth 
-          mt="md" 
-          leftSection={<IconListDetails size={16} />}
-          onClick={() => setLedgerOpened(true)}
-        >
-          View Ledger
-        </Button>
+        <Group grow mt="md">
+          <Button
+            variant="light"
+            color="gray"
+            leftSection={<IconListDetails size={16} />}
+            onClick={() => setLedgerOpened(true)}
+          >
+            Ledger
+          </Button>
+          <Button
+            variant="light"
+            color="violet"
+            leftSection={<IconChartLine size={16} />}
+            onClick={() => { setExploreSigma(currentSigma); setExploreOpened(true); }}
+            disabled={!strategy.sma200 || !strategy.dailyVolatility}
+          >
+            Explore
+          </Button>
+        </Group>
       </Card>
 
       <Modal opened={ledgerOpened} onClose={() => setLedgerOpened(false)} title={`${strategy.symbol} Ledger`} size="xl">
@@ -483,6 +494,194 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
             )}
           </Tabs.Panel>
         </Tabs>
+      </Modal>
+
+      <Modal opened={exploreOpened} onClose={() => setExploreOpened(false)} title={`${strategy.symbol} — Price Explorer`} centered size="lg">
+        {(() => {
+          const sma = strategy.sma200!;
+          const vol = strategy.dailyVolatility!;
+
+          // Sigma → Price conversion
+          const sigmaToPrice = (s: number) => sma * (1 - s * vol);
+          const ep = sigmaToPrice(exploreSigma);
+
+          // Gauge range — fixed to band boundaries
+          const eMinScale = strategy.bandLo;
+          const eMaxScale = strategy.bandHi;
+          const ePct = (sigma: number) => Math.max(0, Math.min(100, ((sigma - eMinScale) / (eMaxScale - eMinScale)) * 100));
+
+          const eBandLeftPct = ePct(strategy.bandLo);
+          const eBandRightPct = ePct(strategy.bandHi);
+          const eBandWidthPct = Math.max(0, eBandRightPct - eBandLeftPct);
+          const eIndicatorPct = ePct(exploreSigma);
+          const eCurrentPct = ePct(currentSigma);
+          const eAlignLabel = (p: number) => p < 10 ? '0' : p > 90 ? '-100%' : '-50%';
+
+          // Compute target at explore price
+          const eSigma = exploreSigma;
+          const eProgress = (eSigma - strategy.bandLo) / (strategy.bandHi - strategy.bandLo);
+          const eLinearValue = strategy.maxBudget * eProgress;
+          const eUnclamped = ep > 0 ? Math.round(eLinearValue / ep) : 0;
+          const eMaxShares = ep > 0 ? Math.round(strategy.maxBudget / ep) : 0;
+          const eTarget = Math.max(0, Math.min(eMaxShares, eUnclamped));
+          const eDelta = eTarget - currentShares;
+          const eAction = eDelta > 0 ? 'BUY' : eDelta < 0 ? 'SELL' : null;
+          const eValue = eTarget * ep;
+
+          // LIFO check for sells
+          let eProfitableQty = 0;
+          if (eDelta < 0) {
+            const sortedLots = [...strategy.lots].sort((a, b) => a.price - b.price);
+            let remaining = Math.abs(eDelta);
+            for (const lot of sortedLots) {
+              if (remaining <= 0) break;
+              if (ep < lot.price) break;
+              const take = Math.min(lot.shares, remaining);
+              eProfitableQty += take;
+              remaining -= take;
+            }
+          }
+
+          // Drag handler
+          const handleGaugeDrag = (e: React.MouseEvent | React.TouchEvent) => {
+            const bar = (e.currentTarget as HTMLElement).closest('[data-explore-bar]') as HTMLElement;
+            if (!bar) return;
+            const rect = bar.getBoundingClientRect();
+            const update = (clientX: number) => {
+              const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+              const sigma = strategy.bandLo + pct * (strategy.bandHi - strategy.bandLo);
+              setExploreSigma(Math.round(sigma * 100) / 100);
+            };
+            const isTouch = 'touches' in e;
+            if (isTouch) {
+              update((e as React.TouchEvent).touches[0].clientX);
+              const onMove = (ev: TouchEvent) => update(ev.touches[0].clientX);
+              const onUp = () => { document.removeEventListener('touchmove', onMove); document.removeEventListener('touchend', onUp); };
+              document.addEventListener('touchmove', onMove);
+              document.addEventListener('touchend', onUp);
+            } else {
+              update((e as React.MouseEvent).clientX);
+              const onMove = (ev: MouseEvent) => update(ev.clientX);
+              const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+              document.addEventListener('mousemove', onMove);
+              document.addEventListener('mouseup', onUp);
+            }
+          };
+
+          const isOutOfBand = exploreSigma < strategy.bandLo || exploreSigma > strategy.bandHi;
+
+          return (
+            <Stack gap="md">
+              {/* Gauge — matches card style */}
+              <div style={{ position: 'relative', height: '80px', marginTop: '1.5rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center' }}>
+                <div data-explore-bar style={{ position: 'relative', width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', cursor: 'pointer' }}
+                  onMouseDown={handleGaugeDrag} onTouchStart={handleGaugeDrag}
+                >
+                  {/* Band background */}
+                  <div style={{ position: 'absolute', left: `${eBandLeftPct}%`, top: 0, bottom: 0, width: `${eBandWidthPct}%`, background: 'rgba(51, 154, 240, 0.15)', borderRadius: '4px' }} />
+
+                  {/* Band Lo marker */}
+                  <div style={{ position: 'absolute', left: `${eBandLeftPct}%`, top: '-4px', bottom: '-4px', width: '2px', background: 'rgba(255,255,255,0.2)' }} />
+                  <div style={{ position: 'absolute', left: `${eBandLeftPct}%`, top: '-20px', transform: `translateX(${eAlignLabel(eBandLeftPct)})`, whiteSpace: 'nowrap' }}>
+                    <Text size="10px" c="dimmed" fw={600}>${sigmaToPrice(strategy.bandLo).toFixed(0)}</Text>
+                  </div>
+                  <div style={{ position: 'absolute', left: `${eBandLeftPct}%`, bottom: '-18px', transform: `translateX(${eAlignLabel(eBandLeftPct)})`, whiteSpace: 'nowrap' }}>
+                    <Text size="10px" c="dimmed" fw={600}>{strategy.bandLo === 0 ? 0 : -strategy.bandLo}σ</Text>
+                  </div>
+
+                  {/* Band Hi marker */}
+                  <div style={{ position: 'absolute', left: `${eBandRightPct}%`, top: '-4px', bottom: '-4px', width: '2px', background: 'rgba(255,255,255,0.2)' }} />
+                  <div style={{ position: 'absolute', left: `${eBandRightPct}%`, top: '-20px', transform: `translateX(${eAlignLabel(eBandRightPct)})`, whiteSpace: 'nowrap' }}>
+                    <Text size="10px" c="dimmed" fw={600}>${sigmaToPrice(strategy.bandHi).toFixed(0)}</Text>
+                  </div>
+                  <div style={{ position: 'absolute', left: `${eBandRightPct}%`, bottom: '-18px', transform: `translateX(${eAlignLabel(eBandRightPct)})`, whiteSpace: 'nowrap' }}>
+                    <Text size="10px" c="dimmed" fw={600}>{strategy.bandHi === 0 ? 0 : -strategy.bandHi}σ</Text>
+                  </div>
+
+                  {/* Current price ghost marker */}
+                  {strategy.latestPrice && (
+                    <div style={{
+                      position: 'absolute', left: `${eCurrentPct}%`, top: '-2px',
+                      width: '12px', height: '12px',
+                      border: '2px solid rgba(51, 154, 240, 0.4)',
+                      borderRadius: '50%', transform: 'translateX(-50%)',
+                      zIndex: 2,
+                    }} />
+                  )}
+
+                  {/* Explore indicator (draggable) */}
+                  <div style={{
+                    position: 'absolute', left: `${eIndicatorPct}%`, top: '-6px',
+                    width: '20px', height: '20px',
+                    background: isOutOfBand ? '#f59f00' : '#7c3aed',
+                    borderRadius: '50%', transform: 'translateX(-50%)',
+                    boxShadow: `0 0 12px ${isOutOfBand ? 'rgba(245, 159, 0, 0.5)' : 'rgba(124, 58, 237, 0.5)'}`,
+                    cursor: 'grab', zIndex: 3,
+                  }} />
+                  <div style={{ position: 'absolute', left: `${eIndicatorPct}%`, top: '-28px', transform: `translateX(${eAlignLabel(eIndicatorPct)})`, zIndex: 4, whiteSpace: 'nowrap' }}>
+                    <Text size="11px" fw={800} c={isOutOfBand ? 'orange' : 'violet'}>${ep.toFixed(2)}</Text>
+                  </div>
+                  <div style={{ position: 'absolute', left: `${eIndicatorPct}%`, bottom: '-22px', transform: `translateX(${eAlignLabel(eIndicatorPct)})`, zIndex: 4, whiteSpace: 'nowrap' }}>
+                    <Text size="11px" fw={800} c={isOutOfBand ? 'orange' : 'violet'}>{(Math.abs(exploreSigma) < 0.05 ? 0 : -exploreSigma).toFixed(1)}σ</Text>
+                  </div>
+                </div>
+              </div>
+
+              {/* Exact price input */}
+              <NumberInput
+                value={Math.round(ep * 100) / 100}
+                onChange={(v) => {
+                  const p = Number(v);
+                  if (p > 0) setExploreSigma(Math.round((sma - p) / (sma * vol) * 100) / 100);
+                }}
+                prefix="$"
+                decimalScale={2}
+                step={1}
+                size="xs"
+                w={140}
+                label="Exact Price"
+              />
+
+              <div style={{ background: 'rgba(255,255,255,0.03)', padding: 16, borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+                <Group grow mb={8}>
+                  <div>
+                    <Text size="xs" c="dimmed">Sigma Below</Text>
+                    <Text size="lg" fw={700}>{eSigma.toFixed(2)}σ</Text>
+                  </div>
+                  <div>
+                    <Text size="xs" c="dimmed">Target Shares</Text>
+                    <Text size="lg" fw={700}>{eTarget}</Text>
+                  </div>
+                  <div>
+                    <Text size="xs" c="dimmed">Target Value</Text>
+                    <Text size="lg" fw={700}>${eValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}</Text>
+                  </div>
+                </Group>
+                <Group grow>
+                  <div>
+                    <Text size="xs" c="dimmed">Current Shares</Text>
+                    <Text size="sm" fw={600}>{currentShares}</Text>
+                  </div>
+                  <div>
+                    <Text size="xs" c="dimmed">Delta</Text>
+                    <Text size="sm" fw={600} c={eDelta > 0 ? 'green' : eDelta < 0 ? 'red' : 'dimmed'}>
+                      {eDelta > 0 ? '+' : ''}{eDelta}
+                    </Text>
+                  </div>
+                  <div>
+                    <Text size="xs" c="dimmed">Action</Text>
+                    <Text size="sm" fw={700} c={eAction === 'BUY' ? 'green' : eAction === 'SELL' ? 'red' : 'dimmed'}>
+                      {eAction ? `${eAction} ${Math.abs(eDelta)}` : 'HOLD'}
+                      {eAction === 'SELL' && eProfitableQty < Math.abs(eDelta) && (
+                        <Text span size="xs" c="orange"> ({eProfitableQty} profitable)</Text>
+                      )}
+                    </Text>
+                  </div>
+                </Group>
+              </div>
+            </Stack>
+          );
+        })()}
       </Modal>
 
       <Modal opened={opened} onClose={() => setOpened(false)} title={`Configure ${strategy.symbol}`} centered>
