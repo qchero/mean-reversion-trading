@@ -9,24 +9,50 @@ Instead of looking at standard stock price or simple percentage drops, the engin
 - A drop in stock price results in a mathematically *higher* standard deviation away from the mean.
 - **Visual Note:** On the UI, we invert this mathematically positive Sigma into a conventional negative string (e.g., `-6σ`) to intuitively indicate the price is *below* the mean.
 
-## 2. Linear Scaling & Target Calculation
-Rather than going "all-in" at a certain price, the engine maps your total capital (`Max Budget`) linearly across a customizable range (`BandLo` to `BandHi`).
+## 2. Target Calculation & Trade Decision
 
-- If price is above `BandLo` (e.g., above -6σ): **Target Shares = 0**
-- If price drops below `BandHi` (e.g., below -14σ): **Target Shares = Max Budget / Price**
-- In between, it scales capital steadily as the price dips deeper:
-  - `Progress = (σ - BandLo) / (BandHi - BandLo)`
-  - `Target Value = Max Budget × Progress`
-- **Final Target Shares:** `Math.round(Target Value / Price)`
+### Step 1: Compute sigma
+```
+sigmaBelow = (SMA200 - price) / (SMA200 × volatility)
+```
 
-## 3. The Execution Threshold (Grid Size)
-To avoid spamming brokers with useless micro-transactions (e.g., buying 1 share at a time whenever the target fluctuates slightly), the system restricts math with a `Min Trade Amount` boundary.
+### Step 2: Compute unclamped target
+The engine maps capital linearly across the band. Below `bandLo` → 0 shares. Above `bandHi` → extrapolates past budget.
+```
+linearTargetValue = maxBudget × (sigmaBelow - bandLo) / (bandHi - bandLo)
+unclampedTargetShares = round(linearTargetValue / price)
+unclampedDiff = unclampedTargetShares - currentShares
+```
 
-- **Trade Threshold:** `Math.max(1, Math.ceil(Min Trade Amount / Price))`
-- **Direction & Trade Size:** Direction comes directly from `diff = targetShares - currentShares`. Positive diff → BUY, negative → SELL. There is no separate "direction guard" — the clamped target already incorporates the budget cap, so `diff` is the final word on what to do.
-- **Primary Gate:** A trade is triggered when `|diff| >= Trade Threshold`. This checks the *actual trade size* against the minimum.
-- **Unclamped Fallback:** When the budget cap or a near-zero position squashes `diff` to just 1–2 shares (e.g., `maxShares = 2` or selling the last 2 shares), `|diff|` can never reach the threshold on its own. In these edge cases, the gate also passes if `|unclampedDiff| >= Trade Threshold` — the unclamped signal strength qualifies the trade even though the executed size is small.
-- *Consequence:* This organically produces a "grid" of buying and selling points that dynamically spaces out based on the stock's current price. Because it leverages `Math.ceil()` for safety, executions are strictly guaranteed to exceed your dollar minimum requirement.
+### Step 3: Clamp to budget
+```
+maxShares = round(maxBudget / price)
+targetShares = clamp(unclampedTargetShares, 0, maxShares)
+diff = targetShares - currentShares
+```
+Direction comes from `diff`. Positive → BUY, negative → SELL. No separate direction guard.
+
+Note: `currentShares` can exceed `maxShares` when shares were accumulated at lower prices (where `maxShares` was higher). A price bounce reduces `maxShares` below the current position, making `diff` negative (sell) even though `unclampedDiff` is positive (buy).
+
+### Step 4: Min-trade gate
+```
+minShares = ceil(minTradeAmount / price)
+minGate = max(1, minShares)
+sameSign = (diff > 0 AND unclampedDiff > 0) OR (diff < 0 AND unclampedDiff < 0)
+
+satisfiesMinTrade =
+    |diff| >= minGate                                ← primary: actual trade size
+ OR (|unclampedDiff| >= minGate AND sameSign)        ← fallback: same-direction only
+```
+
+- **Primary:** the actual trade size meets the dollar minimum.
+- **Fallback:** when budget cap or near-zero position squashes `diff` to 1–2 shares, the unclamped signal strength qualifies the trade — but only if both point the same direction. The `sameSign` check prevents an unclamped BUY from qualifying a budget-cap SELL below the dollar minimum.
+
+### Step 5: Action
+```
+if diff ≠ 0 AND satisfiesMinTrade → action = BUY or SELL
+else → HOLD
+```
 
 ## 4. Execution Timing & Order Types
 Because the engine loops continuously, the Web UI natively tracks and evaluates real-time limit threshold states live intraday.
