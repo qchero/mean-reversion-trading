@@ -93,7 +93,7 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
         )}
         <Area
           yAxisId="left"
-          type="stepAfter"
+          type="monotone"
           dataKey="capitalDeployed"
           name="Capital Deployed"
           stroke="#4dabf7"
@@ -102,7 +102,7 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
         />
         <Line
           yAxisId="right"
-          type="stepAfter"
+          type="monotone"
           dataKey="realizedPnl"
           name="Realized P&L"
           stroke="#51cf66"
@@ -111,7 +111,7 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
         />
         <Line
           yAxisId="right"
-          type="stepAfter"
+          type="monotone"
           dataKey="marginInterest"
           name="Margin Interest"
           stroke="#ff6b6b"
