@@ -111,13 +111,17 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
     return numerator / denominator;
   };
 
-  // If LIFO blocked, we technically target the original targetShares mathematically
-  let awaitingShares = isLifoBlocked 
-      ? targetShares 
-      : (isBuyPosture || sharesDelta === 0) ? currentShares + tradeThreshold : Math.max(0, currentShares - tradeThreshold);
-      
-  const crossoverTarget = (isBuyPosture || sharesDelta === 0) ? Math.max(0, awaitingShares - 0.5) : awaitingShares + 0.5;
+  // Compute the unclamped target at which the trade becomes actionable.
+  // No max(0) clamp — calculatePriceForShares inverts the unclamped formula,
+  // so negative values correctly give the price where |unclampedDiff| hits threshold.
+  let awaitingSharesUnclamped = isLifoBlocked
+      ? targetShares
+      : (isBuyPosture || sharesDelta === 0) ? currentShares + tradeThreshold : currentShares - tradeThreshold;
+
+  const crossoverTarget = (isBuyPosture || sharesDelta === 0) ? Math.max(0, awaitingSharesUnclamped - 0.5) : awaitingSharesUnclamped + 0.5;
   let awaitingPrice = calculatePriceForShares(crossoverTarget);
+  // Display-friendly awaiting shares (clamped to 0 for UI)
+  const awaitingShares = Math.max(0, awaitingSharesUnclamped);
   let isAwaitingLifoFloor = false;
 
   if (!isBuyPosture && lifoBlockerPrice !== null) {
