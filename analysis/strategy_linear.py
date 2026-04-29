@@ -13,11 +13,13 @@ based on how many σ below SMA the closing price is:
 
 Trade rules:
   - Uses previous day's SMA and σ (no look-ahead bias).
-  - Min trade threshold uses unclamped (extrapolated) target to avoid stranding
-    small residual positions when price moves far outside the band.
+  - Min-trade gate: primary |diff| >= ceil(min_trade/price), fallback
+    |unclamped_diff| >= same gate AND same sign as diff (prevents an
+    unclamped BUY signal from qualifying a budget-cap SELL of 1-2 shares).
   - Never sell at a loss: skip LIFO lots where close < lot.price.
 """
 
+import math
 import pandas as pd
 from dataclasses import dataclass
 
@@ -64,9 +66,14 @@ def _evaluate_and_trade(price, sma, sigma, band_lo, band_hi, max_budget,
     target_value = target_shares * price
     diff = target_shares - current_shares
 
-    # Gate: only trade if unclamped diff exceeds min trade threshold
-    min_shares = round(min_trade_amount / price) if min_trade_amount > 0 else 1
-    if diff != 0 and abs(unclamped_diff) >= max(1, min_shares):
+    # Min-trade gate: primary on actual |diff|, fallback on |unclamped_diff|
+    # only when both point the same direction.
+    min_shares = math.ceil(min_trade_amount / price) if min_trade_amount > 0 else 1
+    min_gate = max(1, min_shares)
+    same_sign = (diff > 0 and unclamped_diff > 0) or (diff < 0 and unclamped_diff < 0)
+    satisfies_min_trade = (abs(diff) >= min_gate
+                           or (abs(unclamped_diff) >= min_gate and same_sign))
+    if diff != 0 and satisfies_min_trade:
         if diff > 0:
             # BUY
             lots.append(Lot(date=pd.Timestamp(trading_date), price=price,
