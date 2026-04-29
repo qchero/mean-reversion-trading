@@ -14,8 +14,8 @@ export function NewStrategyModal() {
     symbol: "",
     bandLo: 6,
     bandHi: 14,
-    maxBudget: 30000,
-    minTradeAmount: 2400,
+    maxBudget: 50000,
+    minTradeAmount: 5000,
   });
 
   const handleSubmit = async () => {
@@ -35,7 +35,7 @@ export function NewStrategyModal() {
         minTradeAmount: form.minTradeAmount,
       });
       setOpened(false);
-      setForm({ symbol: "", bandLo: 6, bandHi: 14, maxBudget: 30000, minTradeAmount: 2400 });
+      setForm({ symbol: "", bandLo: 6, bandHi: 14, maxBudget: 50000, minTradeAmount: 5000 });
     } catch (err: any) {
       setError(err.message || "Failed to create strategy");
     } finally {
