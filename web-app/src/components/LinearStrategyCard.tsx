@@ -57,7 +57,7 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
 
   const sharesDelta = targetShares - currentShares;
   const unclampedDelta = unclampedTargetShares - currentShares;
-  const tradeThreshold = strategy.latestPrice ? Math.max(1, Math.ceil(strategy.minTradeAmount / strategy.latestPrice)) : 0;
+  const tradeThreshold = strategy.latestPrice ? Math.max(1, Math.round(strategy.minTradeAmount / strategy.latestPrice)) : 0;
   const sameSign = sharesDelta > 0 ? unclampedDelta > 0 : unclampedDelta < 0;
   let isActionable = (Math.abs(sharesDelta) >= tradeThreshold || (Math.abs(unclampedDelta) >= tradeThreshold && sameSign)) && sharesDelta !== 0;
   const isBuyPosture = sharesDelta > 0;

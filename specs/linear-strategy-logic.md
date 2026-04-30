@@ -36,7 +36,7 @@ Note: `currentShares` can exceed `maxShares` when shares were accumulated at low
 
 ### Step 4: Min-trade gate
 ```
-minShares = ceil(minTradeAmount / price)
+minShares = round(minTradeAmount / price)
 minGate = max(1, minShares)
 sameSign = (diff > 0 AND unclampedDiff > 0) OR (diff < 0 AND unclampedDiff < 0)
 

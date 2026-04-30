@@ -123,7 +123,7 @@ export function evaluateLinearTarget(
   // Step 4: Gate check — use diff against min threshold, but fall back to
   // unclampedDiff when budget cap or near-zero position makes diff too small
   // AND both agree on direction (prevents unclamped BUY qualifying a budget-cap SELL)
-  const minShares = minTradeAmount > 0 ? Math.ceil(minTradeAmount / price) : 1;
+  const minShares = minTradeAmount > 0 ? Math.round(minTradeAmount / price) : 1;
   const minGate = Math.max(1, minShares);
   const sameSign = diff > 0 ? unclampedDiff > 0 : unclampedDiff < 0;
   const satisfiesMinTrade = Math.abs(diff) >= minGate
