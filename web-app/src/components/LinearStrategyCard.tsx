@@ -398,10 +398,11 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                     const cost = lot.shares * lot.price;
                     const lotUnrealized = strategy.latestPrice ? (strategy.latestPrice - lot.price) * lot.shares : 0;
                     const lotUnrealizedPct = strategy.latestPrice ? ((strategy.latestPrice - lot.price) / lot.price) * 100 : 0;
-                    const daysHeld = Math.floor((Date.now() - new Date(lot.createdAt).getTime()) / (1000 * 60 * 60 * 24));
+                    const lotDate = new Date(lot.date + 'T00:00:00');
+                    const daysHeld = Math.floor((Date.now() - lotDate.getTime()) / (1000 * 60 * 60 * 24));
                     return (
                       <Table.Tr key={lot.id}>
-                        <Table.Td>{new Date(lot.createdAt).toLocaleDateString()}</Table.Td>
+                        <Table.Td>{lotDate.toLocaleDateString()}</Table.Td>
                         <Table.Td>{daysHeld}</Table.Td>
                         <Table.Td style={{ textAlign: 'right' }}>${lot.price.toFixed(2)}</Table.Td>
                         <Table.Td style={{ textAlign: 'right' }}>{lot.shares}</Table.Td>
@@ -461,7 +462,7 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
                 <Table.Tbody>
                   {strategy.trades.slice().reverse().map((t: any) => (
                     <Table.Tr key={t.id}>
-                      <Table.Td>{new Date(t.createdAt).toLocaleDateString()}</Table.Td>
+                      <Table.Td>{new Date(t.date + 'T00:00:00').toLocaleDateString()}</Table.Td>
                       <Table.Td>
                         <Badge color={t.action === 'BUY' ? 'blue' : 'gray'} variant="light">{t.action}</Badge>
                       </Table.Td>

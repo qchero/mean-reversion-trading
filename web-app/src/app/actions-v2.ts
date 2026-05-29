@@ -68,10 +68,10 @@ export async function getLinearStrategies() {
   const strats = await prisma.linearStrategy.findMany({
     include: {
       lots: {
-        orderBy: { createdAt: 'desc' }
+        orderBy: { date: 'desc' }
       },
       trades: {
-        orderBy: { createdAt: 'desc' }
+        orderBy: { date: 'desc' }
       },
     },
   });
