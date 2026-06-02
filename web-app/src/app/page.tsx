@@ -4,6 +4,7 @@ import { Container, Title, SimpleGrid, Paper, Text } from "@mantine/core";
 import { NewStrategyModal } from "@/components/NewStrategyModal";
 import { LogoutButton } from "@/components/LogoutButton";
 import { EngineStatus } from "@/components/EngineStatus";
+import { EngineOfflineBanner } from "@/components/EngineOfflineBanner";
 import { DailyChart } from "@/components/DailyChart";
 import { auth } from "@/auth";
 import { redirect } from "next/navigation";
@@ -89,6 +90,9 @@ export default async function V2Dashboard() {
   }
   const avgCapitalDeployed = totalDays > 0 ? totalCapitalDays / totalDays : 0;
 
+  const ENGINE_STALE_MS = 20 * 60 * 1000;
+  const engineStale = !heartbeat || Date.now() - new Date(heartbeat).getTime() > ENGINE_STALE_MS;
+
   return (
     <Container size="xl" py="xl">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
@@ -105,16 +109,23 @@ export default async function V2Dashboard() {
         </div>
       </div>
 
+      <EngineOfflineBanner heartbeat={heartbeat} />
+
       {dailySnapshots.length > 0 && (
         <Paper p="xs" radius="md" mb="xl" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
           <Text c="dimmed" size="xs" tt="uppercase" fw={700} ta="center" mt={4}>Capital Deployed & P&L</Text>
-          <DailyChart data={dailySnapshots} avgCapitalDeployed={Math.round(avgCapitalDeployed)} unrealizedPnl={Math.round(totalUnrealized * 100) / 100} />
+          <DailyChart
+            data={dailySnapshots}
+            avgCapitalDeployed={Math.round(avgCapitalDeployed)}
+            unrealizedPnl={Math.round(totalUnrealized * 100) / 100}
+            currentValue={Math.round((dailySnapshots[dailySnapshots.length - 1].capitalDeployed + totalUnrealized) * 100) / 100}
+          />
         </Paper>
       )}
 
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
         {strategies.map(s => (
-          <LinearStrategyCard key={s.id} strategy={s} />
+          <LinearStrategyCard key={s.id} strategy={s} engineStale={engineStale} />
         ))}
       </SimpleGrid>
       

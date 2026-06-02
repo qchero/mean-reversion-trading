@@ -14,18 +14,19 @@ import {
   ReferenceLine,
 } from "recharts";
 
-type Snapshot = { date: string; capitalDeployed: number; realizedPnl: number; marginInterest: number; unrealizedPnl?: number };
+type Snapshot = { date: string; capitalDeployed: number; realizedPnl: number; marginInterest: number; unrealizedPnl?: number; currentValue?: number };
 
 interface ChartProps {
   data: Snapshot[];
   avgCapitalDeployed?: number;
   unrealizedPnl?: number;
+  currentValue?: number;
 }
 
 const formatDollar = (v: number) =>
   `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 
-export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartProps) {
+export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl, currentValue }: ChartProps) {
   if (data.length === 0) return null;
 
   const formatDate = (d: string) => {
@@ -33,11 +34,13 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
     return `${parseInt(m)}/${parseInt(day)}`;
   };
 
-  const chartData = data.map((d, i) =>
-    i === data.length - 1 && unrealizedPnl != null
-      ? { ...d, unrealizedPnl }
-      : d
-  );
+  const chartData = data.map((d, i) => {
+    if (i !== data.length - 1) return d;
+    const patch: Partial<Snapshot> = {};
+    if (unrealizedPnl != null) patch.unrealizedPnl = unrealizedPnl;
+    if (currentValue != null) patch.currentValue = currentValue;
+    return { ...d, ...patch };
+  });
 
   return (
     <ResponsiveContainer width="100%" height={260}>
@@ -50,15 +53,6 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
           axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
         />
         <YAxis
-          yAxisId="left"
-          tickFormatter={formatDollar}
-          tick={{ fill: "#888", fontSize: 11 }}
-          axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
-          width={72}
-        />
-        <YAxis
-          yAxisId="right"
-          orientation="right"
           tickFormatter={formatDollar}
           tick={{ fill: "#888", fontSize: 11 }}
           axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
@@ -83,7 +77,6 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
         />
         {avgCapitalDeployed != null && (
           <ReferenceLine
-            yAxisId="left"
             y={avgCapitalDeployed}
             stroke="#4dabf7"
             strokeDasharray="6 4"
@@ -92,7 +85,6 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
           />
         )}
         <Area
-          yAxisId="left"
           type="monotone"
           dataKey="capitalDeployed"
           name="Capital Deployed"
@@ -101,7 +93,6 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
           strokeWidth={2}
         />
         <Line
-          yAxisId="right"
           type="monotone"
           dataKey="realizedPnl"
           name="Realized P&L"
@@ -110,7 +101,6 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
           dot={false}
         />
         <Line
-          yAxisId="right"
           type="monotone"
           dataKey="marginInterest"
           name="Margin Interest"
@@ -119,12 +109,18 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl }: ChartPro
           dot={false}
         />
         <Scatter
-          yAxisId="right"
           dataKey="unrealizedPnl"
           name="Unrealized P&L"
           fill="#da77f2"
           shape="diamond"
           legendType="diamond"
+        />
+        <Scatter
+          dataKey="currentValue"
+          name="Current Value"
+          fill="#ffd43b"
+          shape="circle"
+          legendType="circle"
         />
       </ComposedChart>
     </ResponsiveContainer>

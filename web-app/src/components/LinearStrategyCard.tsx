@@ -8,7 +8,7 @@ import { updateLinearStrategy, deleteLinearStrategy } from "@/app/actions-v2";
 
 type StrategyWithLots = LinearStrategy & { lots: LinearLot[], trades: any[] };
 
-export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots }) {
+export function LinearStrategyCard({ strategy, engineStale = false }: { strategy: StrategyWithLots; engineStale?: boolean }) {
   const [opened, setOpened] = useState(false);
   const [ledgerOpened, setLedgerOpened] = useState(false);
   const [exploreOpened, setExploreOpened] = useState(false);
@@ -184,10 +184,12 @@ export function LinearStrategyCard({ strategy }: { strategy: StrategyWithLots })
         <Group justify="space-between" mb="xs">
           <Group gap="xs">
             <Text fw={700} size="xl">{strategy.symbol}</Text>
-            {strategy.autoExecute ? (
-              <Badge color="green" variant="light">Active</Badge>
-            ) : (
+            {!strategy.autoExecute ? (
               <Badge color="gray" variant="light">Paused</Badge>
+            ) : engineStale ? (
+              <Badge color="red" variant="light">Offline</Badge>
+            ) : (
+              <Badge color="green" variant="light">Active</Badge>
             )}
           </Group>
           <Group gap="sm">
