@@ -80,7 +80,9 @@ pre-open, re-evaluating prices/positions at that point. (I'll still verify the e
 
 ## 5. Config + state (single JSON file)
 
-`src/trading/qt/config.json` holds both the user-maintained plan **and** machine-maintained state:
+`src/trading/qt/config.json` holds both the user-maintained plan **and** machine-maintained state.
+It is **gitignored** (it carries your live positions); a committed `config.example.json` is the
+template — copy it to `config.json` on first setup.
 
 ```json
 {
@@ -143,9 +145,10 @@ a crash between placing and writing back). Mitigations:
 
 ```
 src/trading/qt/
-  SPEC.md          # this doc
-  config.json      # the month's 5 tickers + $ amount
-  config.ts        # load + validate config
+  SPEC.md             # this doc
+  config.example.json # committed template — copy to config.json to start
+  config.json         # the month's 5 tickers + $ amount (gitignored: holds positions/state)
+  config.ts           # load + validate config
   logic.ts         # pure: targetShares, rebalance plan (unit-testable, no IO)
   logic.test.ts    # tests for the math
   engine.ts        # connect, poll loop, 9:20 trigger, place-once

@@ -46,3 +46,6 @@ next-env.d.ts
 *.db
 *.db-shm
 *.db-wal
+
+# qt: live config holds personal positions + state — copy config.example.json to config.json
+/src/trading/qt/config.json

@@ -39,7 +39,7 @@ export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: QtConfig; path
   try {
     raw = readFileSync(abs, 'utf8');
   } catch {
-    throw new Error(`qt config not found at ${abs}`);
+    throw new Error(`qt config not found at ${abs} — copy config.example.json to config.json`);
   }
 
   let parsed: unknown;
