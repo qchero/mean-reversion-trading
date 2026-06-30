@@ -257,6 +257,34 @@ export class IBKRClient {
   }
 
   /**
+   * Place a Market on Open (MOO) order — a market order that participates in the
+   * opening auction (IBKR: MKT + TIF=OPG). Must be submitted before the open.
+   * Returns the IBKR order ID.
+   */
+  placeMOOOrder(
+    symbol: string,
+    action: 'BUY' | 'SELL',
+    quantity: number,
+  ): number {
+    const orderId = this.nextOrderId++;
+    const contract = this.stockContract(symbol);
+
+    const order: IBOrder = {
+      action: action === 'BUY' ? OrderAction.BUY : OrderAction.SELL,
+      orderType: OrderType.MKT,
+      totalQuantity: quantity,
+      tif: TimeInForce.OPG,
+      transmit: true,
+    };
+
+    this.ib.placeOrder(orderId, contract, order);
+    console.log(
+      `[IBKR] Placed ${action} MOO order #${orderId}: ${quantity} ${symbol}`,
+    );
+    return orderId;
+  }
+
+  /**
    * Place a Market on Close (MOC) order. Returns the IBKR order ID.
    */
   placeMOCOrder(

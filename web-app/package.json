@@ -10,6 +10,8 @@
     "lint": "eslint",
     "trade": "tsx src/trading/v2/run.ts",
     "trade:sim": "tsx src/trading/v2/run.ts --simulate",
+    "qt": "tsx src/trading/qt/run.ts",
+    "qt:sim": "tsx src/trading/qt/run.ts --simulate",
     "test": "vitest run",
     "test:watch": "vitest",
     "deploy": "vercel --prod"
