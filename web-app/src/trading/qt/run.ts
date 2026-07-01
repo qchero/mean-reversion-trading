@@ -1,16 +1,8 @@
 /**
  * Entrypoint for the QuantGT monthly rebalancer.
  *
- *   npm run qt            # LIVE preview + MOO placement (PAPER gateway by default)
- *   npm run qt:sim        # offline dry-run (no IBKR connection, no state written)
- *
- * Flags:
- *   --simulate            dry-run (preview + projected plan, never places/writes)
- *   --live                use the LIVE IB Gateway (port 4001) instead of paper
- *   --host <h>            IB Gateway host (default 127.0.0.1)
- *   --port <p>            override port (default 4002 paper / 4001 live)
- *   --client-id <n>       IBKR client id (default 3; v1=1, v2=2)
- *   --config <path>       config file (default src/trading/qt/config.json)
+ *   npm run qt        # LIVE — connects to IB Gateway (4001), places real MOO orders
+ *   npm run qt:sim    # dry-run: connects + prices like live, but never places/writes
  */
 
 import 'dotenv/config';
@@ -18,36 +10,27 @@ import { IBKRClient } from '../ibkr';
 import { QtEngine } from './engine';
 import { DEFAULT_CONFIG_PATH } from './config';
 
-const args = process.argv.slice(2);
-function getArg(name: string, defaultVal: string): string {
-  const idx = args.indexOf(`--${name}`);
-  return idx >= 0 && args[idx + 1] ? args[idx + 1] : defaultVal;
-}
-const hasFlag = (name: string) => args.includes(`--${name}`);
+// Shared IB Gateway; clientId 3 keeps qt off v1 (1) and v2 (2).
+const HOST = '127.0.0.1';
+const PORT = 4001;
+const CLIENT_ID = 3;
 
-const simulate = hasFlag('simulate');
-const live = hasFlag('live');
-const host = getArg('host', '127.0.0.1');
-const defaultPort = live ? '4001' : '4002';
-const port = parseInt(getArg('port', defaultPort), 10);
-const clientId = parseInt(getArg('client-id', '3'), 10);
-const configPath = getArg('config', DEFAULT_CONFIG_PATH);
-
-const mode = simulate ? 'SIMULATION (dry-run)' : live ? 'LIVE TRADING (real $)' : 'PAPER';
+const simulate = process.argv.includes('--simulate');
+const mode = simulate ? 'SIMULATION (dry-run)' : 'LIVE — places real orders';
 
 console.log(`
 ╔══════════════════════════════════════════════╗
 ║  QuantGT Monthly Rebalancer (qt)             ║
 ╠══════════════════════════════════════════════╣
 ║  Mode:       ${mode.padEnd(32)}║
-║  IB Gateway: ${`${host}:${port}`.padEnd(32)}║
-║  Client ID:  ${String(clientId).padEnd(32)}║
+║  IB Gateway: ${`${HOST}:${PORT}`.padEnd(32)}║
+║  Client ID:  ${String(CLIENT_ID).padEnd(32)}║
 ║  Order:      Market-on-Open (MOO / OPG)      ║
 ╚══════════════════════════════════════════════╝
 `);
 
-const client = new IBKRClient(host, port, clientId);
-const engine = new QtEngine(client, configPath, { simulate });
+const client = new IBKRClient(HOST, PORT, CLIENT_ID);
+const engine = new QtEngine(client, DEFAULT_CONFIG_PATH, { simulate });
 
 let shuttingDown = false;
 async function shutdown() {

@@ -3,17 +3,16 @@ import {
   targetSharesFor,
   computeRebalancePlan,
   applyFillToPositions,
+  allocationPerPick,
   evaluateTrigger,
 } from './logic';
 import type { QtConfig } from './config';
 
+// Default fixture: $20k total across 2 picks → $10k per pick.
 function makeConfig(over: Partial<QtConfig> = {}): QtConfig {
   return {
-    month: '2026-07',
-    perTickerUsd: 10000,
+    totalUsd: 20000,
     tickers: ['AAA', 'BBB'],
-    triggerEtTime: '09:20',
-    pollIntervalSec: 300,
     positions: {},
     lastPlacedDate: null,
     ...over,
@@ -85,10 +84,30 @@ describe('computeRebalancePlan', () => {
   });
 
   it('no-op when already at target', () => {
-    const cfg = makeConfig({ tickers: ['AAA'], positions: { AAA: 100 } });
+    // $10k total over 1 pick → $10k/pick → 100 shares at $100.
+    const cfg = makeConfig({ totalUsd: 10000, tickers: ['AAA'], positions: { AAA: 100 } });
     const plan = computeRebalancePlan(cfg, { AAA: 100 });
     expect(findItem(plan, 'AAA').delta).toBe(0);
     expect(findItem(plan, 'AAA').action).toBeNull();
+  });
+
+  it('splits the total budget evenly across the picks', () => {
+    // $30k / 3 picks = $10k per pick.
+    const cfg = makeConfig({ totalUsd: 30000, tickers: ['AAA', 'BBB', 'CCC'], positions: {} });
+    const plan = computeRebalancePlan(cfg, { AAA: 100, BBB: 200, CCC: 50 });
+    expect(findItem(plan, 'AAA').target).toBe(100); // 10000 / 100
+    expect(findItem(plan, 'BBB').target).toBe(50); //  10000 / 200
+    expect(findItem(plan, 'CCC').target).toBe(200); // 10000 / 50
+  });
+
+  it('per-pick allocation excludes dropped holdings', () => {
+    // $120k / 5 picks = $24k each; the held-but-dropped OLD does not dilute it.
+    const cfg = makeConfig({
+      totalUsd: 120000,
+      tickers: ['A', 'B', 'C', 'D', 'E'],
+      positions: { OLD: 10 },
+    });
+    expect(allocationPerPick(cfg)).toBe(24000);
   });
 
   it('skips a pick with no price (cannot size a buy)', () => {

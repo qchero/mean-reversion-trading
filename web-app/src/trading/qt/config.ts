@@ -1,7 +1,7 @@
 /**
  * QuantGT monthly-rebalance config + state.
  *
- * A single JSON file holds both the user-maintained plan (perTickerUsd, tickers)
+ * A single JSON file holds both the user-maintained plan (totalUsd, tickers)
  * and the machine-maintained state (positions, lastPlacedDate). See SPEC.md §5.
  */
 
@@ -9,16 +9,10 @@ import { readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 
 export interface QtConfig {
-  /** Sanity label, e.g. "2026-07". Logged on startup. */
-  month: string;
-  /** Fixed dollar amount allocated to each ticker. */
-  perTickerUsd: number;
+  /** Total dollar budget, split evenly across this month's picks. */
+  totalUsd: number;
   /** This month's picks (the rebalance universe). */
   tickers: string[];
-  /** ET wall-clock time to submit MOO orders, "HH:MM". */
-  triggerEtTime: string;
-  /** Preview/poll cadence in seconds. */
-  pollIntervalSec: number;
 
   // ── Machine-maintained (do not hand-edit) ──
   /** qt's current holdings: symbol -> shares. Source of truth for deltas. */
@@ -29,8 +23,6 @@ export interface QtConfig {
 
 /** Default config path, relative to the process cwd (web-app/). */
 export const DEFAULT_CONFIG_PATH = 'src/trading/qt/config.json';
-
-const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: QtConfig; path: string } {
   const abs = resolve(process.cwd(), path);
@@ -61,8 +53,8 @@ function validate(raw: unknown, abs: string): QtConfig {
   if (typeof raw !== 'object' || raw === null) fail('expected a JSON object');
   const o = raw as Record<string, unknown>;
 
-  if (typeof o.perTickerUsd !== 'number' || !(o.perTickerUsd > 0)) {
-    fail('perTickerUsd must be a positive number');
+  if (typeof o.totalUsd !== 'number' || !(o.totalUsd > 0)) {
+    fail('totalUsd must be a positive number');
   }
 
   if (!Array.isArray(o.tickers) || o.tickers.length === 0 || !o.tickers.every((t) => typeof t === 'string' && t.trim())) {
@@ -71,13 +63,6 @@ function validate(raw: unknown, abs: string): QtConfig {
   const tickers = (o.tickers as string[]).map((t) => t.trim().toUpperCase());
   const dupes = tickers.filter((t, i) => tickers.indexOf(t) !== i);
   if (dupes.length) fail(`duplicate tickers: ${[...new Set(dupes)].join(', ')}`);
-
-  if (typeof o.triggerEtTime !== 'string' || !TIME_RE.test(o.triggerEtTime)) {
-    fail('triggerEtTime must be "HH:MM" (24h ET)');
-  }
-
-  const pollIntervalSec = typeof o.pollIntervalSec === 'number' ? o.pollIntervalSec : 300;
-  if (!(pollIntervalSec > 0)) fail('pollIntervalSec must be a positive number');
 
   // positions: optional, default {}. Validate shape if present.
   let positions: Record<string, number> = {};
@@ -96,14 +81,9 @@ function validate(raw: unknown, abs: string): QtConfig {
   const lastPlacedDate =
     o.lastPlacedDate === undefined || o.lastPlacedDate === null ? null : String(o.lastPlacedDate);
 
-  const month = typeof o.month === 'string' ? o.month : 'unspecified';
-
   return {
-    month,
-    perTickerUsd: o.perTickerUsd as number,
+    totalUsd: o.totalUsd as number,
     tickers,
-    triggerEtTime: o.triggerEtTime as string,
-    pollIntervalSec,
     positions,
     lastPlacedDate,
   };

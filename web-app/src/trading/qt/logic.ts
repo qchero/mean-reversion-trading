@@ -29,6 +29,15 @@ export function targetSharesFor(perTickerUsd: number, price: number): number {
 }
 
 /**
+ * Dollars allocated to each pick = total budget split evenly across this month's
+ * picks. Dropped holdings (held but not in `tickers`) are exited, not funded, so
+ * they don't dilute the per-pick amount.
+ */
+export function allocationPerPick(config: QtConfig): number {
+  return config.totalUsd / config.tickers.length;
+}
+
+/**
  * Build the rebalance plan over the union of this month's tickers and any held
  * positions. Tickers held but not in this month's picks are exited (target 0).
  */
@@ -38,6 +47,7 @@ export function computeRebalancePlan(
 ): RebalanceItem[] {
   const inPicks = new Set(config.tickers);
   const universe = [...new Set([...config.tickers, ...Object.keys(config.positions)])];
+  const perPickUsd = allocationPerPick(config);
 
   const items: RebalanceItem[] = [];
   for (const symbol of universe) {
@@ -49,7 +59,7 @@ export function computeRebalancePlan(
 
     if (inPicks.has(symbol)) {
       if (price !== null && price > 0) {
-        target = targetSharesFor(config.perTickerUsd, price);
+        target = targetSharesFor(perPickUsd, price);
       } else {
         // Can't size a buy/adjust without a price — skip this ticker this cycle.
         target = null;

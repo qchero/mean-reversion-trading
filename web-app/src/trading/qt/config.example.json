@@ -1,9 +1,6 @@
 {
-  "month": "2026-07",
-  "perTickerUsd": 10000,
+  "totalUsd": 50000,
   "tickers": ["NVDA", "MSFT", "AAPL", "GOOGL", "AMZN"],
-  "triggerEtTime": "09:20",
-  "pollIntervalSec": 300,
   "positions": {},
   "lastPlacedDate": null
 }
