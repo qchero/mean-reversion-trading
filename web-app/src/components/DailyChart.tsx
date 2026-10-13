@@ -12,6 +12,7 @@ import {
   Tooltip,
   Legend,
   ReferenceLine,
+  LabelList,
 } from "recharts";
 
 type Snapshot = { date: string; capitalDeployed: number; realizedPnl: number; marginInterest: number; unrealizedPnl?: number; currentValue?: number };
@@ -119,9 +120,21 @@ export function DailyChart({ data, avgCapitalDeployed, unrealizedPnl, currentVal
           dataKey="currentValue"
           name="Current Value"
           fill="#ffd43b"
-          shape="circle"
           legendType="circle"
-        />
+          shape={(props: unknown) => {
+            const { cx, cy, payload } = props as { cx: number; cy: number; payload?: Snapshot };
+            if (payload?.currentValue == null || !Number.isFinite(cy)) return <g />;
+            return <circle cx={cx} cy={cy} r={6} fill="#ffd43b" stroke="#1a1b1e" strokeWidth={2} />;
+          }}
+        >
+          <LabelList
+            dataKey="currentValue"
+            position="left"
+            offset={10}
+            formatter={(v) => (v == null ? "" : formatDollar(Number(v)))}
+            style={{ fill: "#ffd43b", fontSize: 12, fontWeight: 700 }}
+          />
+        </Scatter>
       </ComposedChart>
     </ResponsiveContainer>
   );
