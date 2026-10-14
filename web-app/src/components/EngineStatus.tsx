@@ -14,7 +14,8 @@ export function EngineStatus({ heartbeat }: { heartbeat: Date | null }) {
 
   const agoSec = Math.floor((Date.now() - new Date(heartbeat).getTime()) / 1000);
   const label = agoSec < 60 ? `${agoSec}s ago` : `${Math.floor(agoSec / 60)}m ago`;
-  const alive = agoSec < 120;
+  // Engine heartbeats every ~5 min (market hours) / 15 min (after hours); match EngineOfflineBanner's 20-min window
+  const alive = agoSec < 20 * 60;
 
   return (
     <Badge variant="dot" color={alive ? "green" : "red"} size="sm" style={{ flexShrink: 0 }}>

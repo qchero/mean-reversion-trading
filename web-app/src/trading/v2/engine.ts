@@ -65,6 +65,12 @@ export class LinearTradingEngine {
   private processedOrders = new Set<number>();
   private tickRunning = false;
 
+  // DB write throttling: skip unchanged prices, heartbeat at most every 5 min
+  // (well under the UI's 20-min stale threshold).
+  private static readonly HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+  private lastPersistedPrice = new Map<string, number>();
+  private lastHeartbeatAt = 0;
+
   private simulate = false;
 
   constructor(client: IBKRClient, simulate = false) {
@@ -239,6 +245,10 @@ export class LinearTradingEngine {
       for (const strat of strategies) {
         let state = this.strategies.get(strat.symbol);
 
+        // Mirror the DB's current price so persistPrices() only writes real changes
+        if (strat.latestPrice != null) this.lastPersistedPrice.set(strat.id, strat.latestPrice);
+        else this.lastPersistedPrice.delete(strat.id);
+
         if (!state) {
           console.log(`[LinearEngine] Fetching initial metrics for ${strat.symbol}...`);
           const metrics = await fetchAndComputeMetrics(strat.symbol);
@@ -315,18 +325,20 @@ export class LinearTradingEngine {
     }).catch(() => {});
   }
 
-  /** Batch-write all latestPrice values to DB (called every tick loop, ~60s) */
+  /** Batch-write changed latestPrice values to DB (called every tick loop). Unchanged prices are skipped. */
   private async persistPrices() {
     const updates = [];
     for (const [, state] of this.strategies) {
-      if (state.strategy.latestPrice) {
-        updates.push(
-          prisma.linearStrategy.update({
-            where: { id: state.strategy.id },
-            data: { latestPrice: state.strategy.latestPrice, latestPriceAt: state.strategy.latestPriceAt },
-          }).catch(() => {})
-        );
-      }
+      const { id, latestPrice, latestPriceAt } = state.strategy;
+      if (!latestPrice || this.lastPersistedPrice.get(id) === latestPrice) continue;
+      updates.push(
+        prisma.linearStrategy.update({
+          where: { id },
+          data: { latestPrice, latestPriceAt },
+        })
+          .then(() => { this.lastPersistedPrice.set(id, latestPrice); })
+          .catch(() => {})
+      );
     }
     await Promise.all(updates);
   }
@@ -394,14 +406,18 @@ export class LinearTradingEngine {
       }
     }
 
-    // ── Persist latest prices + heartbeat to DB so the UI stays in sync ──
+    // ── Persist changed prices + (throttled) heartbeat to DB so the UI stays in sync ──
+    const now = Date.now();
+    const heartbeatDue = now - this.lastHeartbeatAt >= LinearTradingEngine.HEARTBEAT_INTERVAL_MS;
     await Promise.all([
       this.persistPrices(),
-      prisma.engineHeartbeat.upsert({
-        where: { id: 'singleton' },
-        update: { timestamp: new Date() },
-        create: { id: 'singleton', timestamp: new Date() },
-      }).catch(() => {}),
+      heartbeatDue
+        ? prisma.engineHeartbeat.upsert({
+            where: { id: 'singleton' },
+            update: { timestamp: new Date(now) },
+            create: { id: 'singleton', timestamp: new Date(now) },
+          }).then(() => { this.lastHeartbeatAt = now; }).catch(() => {})
+        : Promise.resolve(),
     ]);
 
     // ── Execute: place orders at >= 15:45 ET (once per day via cooldown) ──
