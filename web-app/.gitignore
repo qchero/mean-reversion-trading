@@ -49,3 +49,9 @@ next-env.d.ts
 
 # qt: live config holds personal positions + state — copy config.example.json to config.json
 /src/trading/qt/config.json
+
+# v2 engine: fills that failed to reach the DB — reconcile by hand, then delete the line
+/unrecorded-fills.jsonl
+
+# supabase CLI local cache
+/supabase/.temp

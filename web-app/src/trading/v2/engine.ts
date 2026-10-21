@@ -1,9 +1,19 @@
 import { PrismaClient, LinearLot, LinearStrategy } from '@prisma/client';
+import { randomUUID } from 'crypto';
+import { appendFileSync, existsSync, readFileSync } from 'fs';
+import path from 'path';
 import { IBKRClient, MarketTick, OrderFill } from '../ibkr';
 import { fetchAndComputeMetrics, evaluateLinearTarget, getLatestPrice, LinearData } from './logic';
 
 const prisma = new PrismaClient();
 const STRATEGY_RELOAD_MS = 60 * 1000;
+// Reload + tick cadence while the market is closed — nothing executes, so keep DB traffic minimal
+const MARKET_CLOSED_INTERVAL_MS = 15 * 60 * 1000;
+
+// Fills that could not be written to the DB are appended here; their symbols stop trading until reconciled
+const UNRECORDED_FILLS_PATH = path.join(process.cwd(), 'unrecorded-fills.jsonl');
+// Retry delays for fill writes (~16 min total) to ride out DB outages before falling back to the journal
+const FILL_WRITE_RETRY_DELAYS_MS = [5, 15, 30, 60, 120, 240, 480].map(s => s * 1000);
 
 // The exact minute of the day to execute real trades (15:45 ET)
 const EXEC_HOUR = 15;
@@ -51,11 +61,26 @@ function isExecutionTime(): boolean {
   return isMarketOpen() && minutes >= EXEC_HOUR * 60 + EXEC_MINUTE;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Symbols with entries in the unrecorded-fills journal — their DB lots no longer match IBKR */
+function loadBlockedSymbols(): Set<string> {
+  if (!existsSync(UNRECORDED_FILLS_PATH)) return new Set();
+  const lines = readFileSync(UNRECORDED_FILLS_PATH, 'utf8').split('\n').filter(Boolean);
+  return new Set(lines.map(line => JSON.parse(line).symbol as string));
+}
+
+function sameMetrics(a: LinearData, b: LinearData): boolean {
+  return a.sma100 === b.sma100 && a.sma200 === b.sma200 && a.sma300 === b.sma300 && a.sigma === b.sigma;
+}
+
 export class LinearTradingEngine {
   private ibkr: IBKRClient;
   private strategies = new Map<string, StrategyState>();
   private running = false;
-  private reloadTimer: ReturnType<typeof setInterval> | null = null;
+  private reloadTimer: ReturnType<typeof setTimeout> | null = null;
   private metricsRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private executionTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -63,6 +88,7 @@ export class LinearTradingEngine {
   private lastBatchExecutedAt: number | null = null;
   private pendingOrders = new Map<number, PendingContext>();
   private processedOrders = new Set<number>();
+  private lastPersistedPrices = new Map<string, number>(); // strategyId → latestPrice last written to DB
   private tickRunning = false;
 
   private simulate = false;
@@ -81,15 +107,28 @@ export class LinearTradingEngine {
       this.handleOrderFill(fill).catch(e => console.error(`[LinearEngine] Fallback error handling order fill:`, e));
     });
 
+    const blocked = loadBlockedSymbols();
+    if (blocked.size > 0) {
+      console.error(`[LinearEngine] ‼️ Unrecorded fills for ${[...blocked].join(', ')} in ${UNRECORDED_FILLS_PATH} — these symbols will not trade until reconciled.`);
+    }
+
     await this.loadStrategies();
     this.running = true;
 
-    this.reloadTimer = setInterval(() => this.loadStrategies(), STRATEGY_RELOAD_MS);
+    // Strategy reload: 60s when market open, 15min when closed
+    const scheduleReload = () => {
+      if (!this.running) return;
+      const interval = isMarketOpen() ? STRATEGY_RELOAD_MS : MARKET_CLOSED_INTERVAL_MS;
+      this.reloadTimer = setTimeout(() => {
+        this.loadStrategies().finally(scheduleReload);
+      }, interval);
+    };
+    scheduleReload();
     this.metricsRefreshTimer = setInterval(() => this.refreshMetrics(), 60 * 60 * 1000);
 
     // Tick loop: 60s when market open, 15min when closed
     const scheduleNext = () => {
-      const interval = isMarketOpen() ? 60_000 : 15 * 60_000;
+      const interval = isMarketOpen() ? 60_000 : MARKET_CLOSED_INTERVAL_MS;
       this.executionTimer = setTimeout(() => {
         this.tick()
           .catch(e => console.error(`[LinearEngine] Execution loop error:`, e))
@@ -163,6 +202,10 @@ export class LinearTradingEngine {
       console.log(`  [Order] No active strategy for ${symbol}`);
       return;
     }
+    if (loadBlockedSymbols().has(symbol)) {
+      console.log(`  [Order] ${symbol} is blocked — unrecorded fill in ${UNRECORDED_FILLS_PATH}`);
+      return;
+    }
 
     const ev = this.evaluateState(state, overridePrice);
     if (!ev) {
@@ -210,7 +253,7 @@ export class LinearTradingEngine {
 
   async stop() {
     this.running = false;
-    if (this.reloadTimer) clearInterval(this.reloadTimer);
+    if (this.reloadTimer) clearTimeout(this.reloadTimer);
     if (this.metricsRefreshTimer) clearInterval(this.metricsRefreshTimer);
     if (this.executionTimer) clearTimeout(this.executionTimer);
     this.ibkr.disconnect();
@@ -276,8 +319,10 @@ export class LinearTradingEngine {
     for (const [sym, state] of this.strategies) {
       const metrics = await fetchAndComputeMetrics(sym);
       if (metrics) {
+        // Metrics only move once a day (new close), so skip the hourly no-op writes
+        const changed = !sameMetrics(metrics, state.metrics);
         state.metrics = metrics;
-        await this.persistMetrics(state.strategy.id, metrics);
+        if (changed) await this.persistMetrics(state.strategy.id, metrics);
       }
     }
   }
@@ -315,20 +360,30 @@ export class LinearTradingEngine {
     }).catch(() => {});
   }
 
-  /** Batch-write all latestPrice values to DB (called every tick loop, ~60s) */
-  private async persistPrices() {
-    const updates = [];
-    for (const [, state] of this.strategies) {
-      if (state.strategy.latestPrice) {
-        updates.push(
-          prisma.linearStrategy.update({
-            where: { id: state.strategy.id },
-            data: { latestPrice: state.strategy.latestPrice, latestPriceAt: state.strategy.latestPriceAt },
-          }).catch(() => {})
-        );
-      }
+  /**
+   * Write changed latestPrice values + heartbeat in ONE transaction (called every tick loop).
+   * One commit per tick instead of one per symbol, and nothing but the heartbeat when the market is closed.
+   */
+  private async persistPricesAndHeartbeat() {
+    const changed = [...this.strategies.values()].filter(s =>
+      s.strategy.latestPrice && s.strategy.latestPrice !== this.lastPersistedPrices.get(s.strategy.id)
+    );
+    try {
+      await prisma.$transaction([
+        ...changed.map(s => prisma.linearStrategy.update({
+          where: { id: s.strategy.id },
+          data: { latestPrice: s.strategy.latestPrice, latestPriceAt: s.strategy.latestPriceAt },
+        })),
+        prisma.engineHeartbeat.upsert({
+          where: { id: 'singleton' },
+          update: { timestamp: new Date() },
+          create: { id: 'singleton', timestamp: new Date() },
+        }),
+      ]);
+      for (const s of changed) this.lastPersistedPrices.set(s.strategy.id, s.strategy.latestPrice!);
+    } catch (e) {
+      console.error(`[LinearEngine] Failed to persist prices/heartbeat:`, (e as Error).message);
     }
-    await Promise.all(updates);
   }
 
   private handleTick(tick: MarketTick) {
@@ -395,14 +450,7 @@ export class LinearTradingEngine {
     }
 
     // ── Persist latest prices + heartbeat to DB so the UI stays in sync ──
-    await Promise.all([
-      this.persistPrices(),
-      prisma.engineHeartbeat.upsert({
-        where: { id: 'singleton' },
-        update: { timestamp: new Date() },
-        create: { id: 'singleton', timestamp: new Date() },
-      }).catch(() => {}),
-    ]);
+    await this.persistPricesAndHeartbeat();
 
     // ── Execute: place orders at >= 15:45 ET (once per day via cooldown) ──
     if (this.lastBatchExecutedAt &&
@@ -413,9 +461,14 @@ export class LinearTradingEngine {
 
     console.log(`\n[${timestamp()}] ═══ EXECUTION TRIGGERED (${actionable.length} orders) ═══`);
     let ordersPlaced = 0;
+    const blocked = loadBlockedSymbols();
 
     for (const { state, price, evalResult } of actionable) {
       const symbol = state.strategy.symbol;
+      if (blocked.has(symbol)) {
+        console.error(`  !! ${symbol} BLOCKED — unrecorded fill in ${UNRECORDED_FILLS_PATH}. Record it in the DB and remove the line to resume.`);
+        continue;
+      }
       const qty = Math.abs(evalResult.clampedDiff);
       console.log(`  >> ${evalResult.action} ${qty} ${symbol} @ $${price.toFixed(2)}`);
       try {
@@ -520,18 +573,24 @@ export class LinearTradingEngine {
 
     console.log(`[LinearEngine] ORDER FILLED! Booking ${qty} shares at $${fillPrice.toFixed(2)}...`);
 
-    if (action === 'BUY') {
-      const lot = await prisma.linearLot.create({
-        data: { strategyId: state.strategy.id, date: todayStr(), price: fillPrice, shares: qty }
-      });
-      state.lots.push(lot);
+    const symbol = state.strategy.symbol;
+    const strategyId = state.strategy.id;
+    const date = todayStr();
+    const tradeId = randomUUID(); // generated up front so retries can detect an earlier commit (see recordFill)
+    const journalEntry = { ibkrOrderId: fill.ibkrOrderId, symbol, strategyId, action, filledQty: qty, fillPrice, date };
 
-      await prisma.linearTrade.create({
-        data: {
-          strategyId: state.strategy.id, date: todayStr(), action, price: fillPrice, shares: qty,
-          targetValue: evalResult.targetValue, sigmaBelow: evalResult.sigmaBelow
-        }
-      });
+    if (action === 'BUY') {
+      const lot = { id: randomUUID(), strategyId, date, price: fillPrice, shares: qty };
+      const recorded = await this.recordFill(symbol, tradeId, journalEntry, () => prisma.$transaction([
+        prisma.linearTrade.create({
+          data: {
+            id: tradeId, strategyId, date, action, price: fillPrice, shares: qty,
+            targetValue: evalResult.targetValue, sigmaBelow: evalResult.sigmaBelow
+          }
+        }),
+        prisma.linearLot.create({ data: lot }),
+      ]));
+      if (recorded) state.lots.push({ ...lot, createdAt: new Date(), updatedAt: new Date() });
     } else if (action === 'SELL') {
       const sortedLots = this.sortedLotsForSell(state);
 
@@ -550,7 +609,7 @@ export class LinearTradingEngine {
         remaining -= take;
       }
 
-      // Phase 2: Execute profitable lots
+      // Phase 2: Book profitable lots — trade row + lot changes commit together or not at all
       if (plan.length > 0) {
         let sellPnl = 0;
         let sellCostBasis = 0;
@@ -560,30 +619,64 @@ export class LinearTradingEngine {
           sellPnl += (fillPrice - lot.price) * sellQty;
           sellCostBasis += lot.price * sellQty;
           actuallySold += sellQty;
-
-          lot.shares -= sellQty;
-          if (lot.shares === 0) {
-            await prisma.linearLot.delete({ where: { id: lot.id } });
-          } else {
-            await prisma.linearLot.update({ where: { id: lot.id }, data: { shares: lot.shares } });
-          }
         }
 
-        state.lots = state.lots.filter(l => l.shares > 0);
-
         const avgCost = sellCostBasis / actuallySold;
-        await prisma.linearTrade.create({
-          data: {
-            strategyId: state.strategy.id, date: todayStr(), action, price: fillPrice, shares: actuallySold,
-            targetValue: evalResult.targetValue, sigmaBelow: evalResult.sigmaBelow,
-            pnl: sellPnl, costBasis: avgCost
-          }
-        });
+        const recorded = await this.recordFill(
+          symbol, tradeId,
+          { ...journalEntry, lots: plan.map(({ lot, sellQty }) => ({ lotId: lot.id, lotPrice: lot.price, sellQty })) },
+          () => prisma.$transaction([
+            prisma.linearTrade.create({
+              data: {
+                id: tradeId, strategyId, date, action, price: fillPrice, shares: actuallySold,
+                targetValue: evalResult.targetValue, sigmaBelow: evalResult.sigmaBelow,
+                pnl: sellPnl, costBasis: avgCost
+              }
+            }),
+            ...plan.map(({ lot, sellQty }) => lot.shares === sellQty
+              ? prisma.linearLot.delete({ where: { id: lot.id } })
+              : prisma.linearLot.update({ where: { id: lot.id }, data: { shares: lot.shares - sellQty } })),
+          ])
+        );
+
+        if (recorded) {
+          for (const { lot, sellQty } of plan) lot.shares -= sellQty;
+          state.lots = state.lots.filter(l => l.shares > 0);
+        }
       }
     }
 
     if (!simulateCtx) {
       this.pendingOrders.delete(fill.ibkrOrderId);
     }
+  }
+
+  /**
+   * Run a fill's DB write, retrying through DB outages. A retry first checks whether `tradeId` already
+   * exists — an attempt can commit and still error (e.g. timeout on the response) and must not be re-applied.
+   * If every attempt fails, the fill is appended to UNRECORDED_FILLS_PATH, which blocks the symbol from
+   * trading until it is reconciled by hand. Returns whether the fill is in the DB.
+   */
+  private async recordFill(
+    symbol: string,
+    tradeId: string,
+    journalEntry: Record<string, unknown>,
+    write: () => Promise<unknown>,
+  ): Promise<boolean> {
+    const attempts = FILL_WRITE_RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        if (attempt > 1 && await prisma.linearTrade.findUnique({ where: { id: tradeId } })) return true;
+        await write();
+        return true;
+      } catch (e) {
+        console.error(`[LinearEngine] Recording ${symbol} fill failed (attempt ${attempt}/${attempts}):`, (e as Error).message);
+        if (attempt < attempts) await sleep(FILL_WRITE_RETRY_DELAYS_MS[attempt - 1]);
+      }
+    }
+
+    appendFileSync(UNRECORDED_FILLS_PATH, JSON.stringify({ ...journalEntry, tradeId, at: new Date().toISOString() }) + '\n');
+    console.error(`[LinearEngine] ‼️ ${symbol} fill NOT recorded in DB — saved to ${UNRECORDED_FILLS_PATH}. ${symbol} will not trade until it is recorded and the line removed.`);
+    return false;
   }
 }
