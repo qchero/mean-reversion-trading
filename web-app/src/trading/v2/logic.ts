@@ -1,5 +1,6 @@
 import YahooFinance from 'yahoo-finance2';
-const yahooFinance = new YahooFinance();
+import { fetchLiveQuotes } from '../quotes';
+const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
 export interface LinearData {
   sma100: number;
@@ -151,13 +152,14 @@ export interface PriceSnapshot {
   dayLow: number | null;
 }
 
+/** Latest pre / regular / post-market price (whichever traded most recently). */
 export async function getLatestPrice(symbol: string): Promise<PriceSnapshot> {
   try {
-    const q = await yahooFinance.quote(symbol);
+    const [q] = (await fetchLiveQuotes([symbol])).values();
     return {
-      price: q.regularMarketPrice ?? null,
-      dayHigh: q.regularMarketDayHigh ?? null,
-      dayLow: q.regularMarketDayLow ?? null,
+      price: q?.price ?? null,
+      dayHigh: q?.dayHigh ?? null,
+      dayLow: q?.dayLow ?? null,
     };
   } catch (error) {
     console.error(`[Logic] getLatestPrice failed for ${symbol}:`, error);

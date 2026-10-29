@@ -40,8 +40,8 @@ Whole shares only (`round`). No fractional shares.
 2. Loads + validates the JSON config.
 3. Reads current holdings (see **[OPEN Q1]**).
 4. **Poll loop every 5 min** (`POLL_INTERVAL_SEC`, hard-coded 300s in `engine.ts`):
-   - Read each ticker's latest **IBKR** quote (`getQuote`); size off the bid/ask **mid**, falling
-     back to `last`. bid/ask/last are logged per ticker for inspection.
+   - Read each ticker's latest **Yahoo** quote (`readQuotes`): the most recent of the pre-market /
+     regular / post-market prices. Price, session and trade time are logged per ticker.
    - Compute target + delta; print a **preview table** (no orders placed).
 5. **Trigger:** once the clock passes **09:20 America/New_York** (`TRIGGER_ET_TIME`) AND not yet placed:
    - Place all non-zero-delta orders as Market-on-Open, **exactly once** per process.
@@ -52,15 +52,17 @@ Whole shares only (`round`). No fractional shares.
 
 ### Why poll before the trigger?
 The open price isn't known until 9:30. The pre-9:20 loop is a live preview using the latest
-IBKR quote (pre-market). The share counts actually submitted are computed at the 9:20 trigger
+quote (pre-market). The share counts actually submitted are computed at the 9:20 trigger
 from the then-latest quote. The dollar allocation is therefore approximate (inherent to MOO).
 
 ### Price source
-Quotes come from **IBKR streaming market data** (`subscribeMarketData` / `getQuote`) — the same
-feed we execute against (replacing the earlier Yahoo fetch). Sizing uses the bid/ask mid when
-present, else `last`; bid/ask/last are logged each cycle. Requires a live US-equity market-data
-subscription on the account. `--simulate` connects and prices identically — it only skips order
-placement and the state write-back.
+Quotes come from **Yahoo** (`fetchLiveQuotes` in `src/trading/quotes.ts`, shared with v2), polled
+once per cycle in one batched request. Yahoo reports a price + timestamp per session; sizing uses
+whichever traded most recently — at the 9:20 trigger that's the pre-market price, falling back to
+the prior post-market / close for a ticker that hasn't traded pre-market yet. No IBKR market-data
+subscription is needed; IBKR is only used to place orders. A failed Yahoo request is retried
+(3 attempts, 5s apart); if all fail, every price is null (no buys sized that cycle). `--simulate` connects and prices identically — it only
+skips order placement and the state write-back.
 
 ## 4. Order type — Market-on-Open
 
@@ -182,7 +184,7 @@ src/trading/qt/
 - **Safety is `--simulate`** (same model as v2's `npm run trade`). Connection is hard-coded to
   `127.0.0.1:4001` (the shared IB Gateway), clientId `3`. `npm run qt` connects there and places
   **real** MOO orders; only `npm run qt:sim` is a safe preview. No CLI flags.
-- `--simulate` / dry-run: connects + streams quotes like live, computes + prints the plan, but
+- `--simulate` / dry-run: connects + polls quotes like live, computes + prints the plan, but
   never calls `placeMOOOrder` and never writes state.
 - **Idempotency (per trading date):** in-process `placed` flag guards a single submit per run; the
   persisted `lastPlacedDate` (§5) guards across restarts — if it equals the target trading date,

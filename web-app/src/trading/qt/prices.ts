@@ -1,52 +1,45 @@
 /**
- * Price sourcing for qt — IBKR streaming market data (same feed we execute
- * against), isolated from the pure rebalance logic so logic.ts stays testable.
+ * Price sourcing for qt — Yahoo quotes, isolated from the pure rebalance logic so logic.ts stays
+ * testable. IBKR is only used to place orders.
  *
- * Quotes come from `IBKRClient.subscribeMarketData` / `getQuote`. The sizing
- * price is the bid/ask mid, falling back to the last trade; bid/ask/last are
- * surfaced per ticker (see engine logging) so the choice can be reviewed.
+ * Quotes come from `fetchLiveQuotes`: the most recent of the pre-market, regular and post-market
+ * prices. qt sizes at the 09:20 trigger, so that's normally the pre-market price, falling back to
+ * the prior post-market / close when a ticker hasn't traded pre-market yet.
  */
 
-import type { IBKRClient } from '../ibkr';
+import { LiveQuote, QuoteSession, fetchLiveQuotes } from '../quotes';
 
 export interface QuoteLine {
   symbol: string;
-  bid: number;
-  ask: number;
-  last: number;
-  /** Sizing price chosen from the quote; null when nothing usable yet. */
+  /** Sizing price; null when Yahoo returned nothing usable. */
   price: number | null;
-  /** Which field `price` came from. */
-  source: 'last' | 'mid' | 'none';
+  /** Which session `price` came from. */
+  session: QuoteSession | null;
+  /** When `price` traded. */
+  time: Date | null;
 }
+
+/** Attempts per cycle — a transient failure at the trigger would otherwise skip every buy. */
+const QUOTE_ATTEMPTS = 3;
+const QUOTE_RETRY_MS = 5000;
 
 /**
- * Pick the sizing price from a quote: the bid/ask mid, falling back to the last
- * trade when bid/ask is incomplete. Null when neither is available (e.g. ticks
- * haven't arrived yet).
+ * Fetch the latest quotes for the given symbols, retrying transient failures. If every attempt
+ * fails, all prices are null.
  */
-export function pickQuotePrice(
-  tick: { bid: number; ask: number; last: number } | undefined,
-): { price: number | null; source: 'last' | 'mid' | 'none' } {
-  if (tick && tick.bid > 0 && tick.ask > 0) {
-    return { price: (tick.bid + tick.ask) / 2, source: 'mid' };
+export async function readQuotes(symbols: string[]): Promise<QuoteLine[]> {
+  let quotes = new Map<string, LiveQuote>();
+  for (let attempt = 1; attempt <= QUOTE_ATTEMPTS; attempt++) {
+    try {
+      quotes = await fetchLiveQuotes(symbols);
+      break;
+    } catch (e) {
+      console.error(`[qt] Yahoo quote request failed (attempt ${attempt}/${QUOTE_ATTEMPTS}):`, (e as Error).message);
+      if (attempt < QUOTE_ATTEMPTS) await new Promise((r) => setTimeout(r, QUOTE_RETRY_MS));
+    }
   }
-  if (tick && tick.last > 0) return { price: tick.last, source: 'last' };
-  return { price: null, source: 'none' };
-}
-
-/** Snapshot the latest IBKR quotes for the given symbols. */
-export function readQuotes(ibkr: IBKRClient, symbols: string[]): QuoteLine[] {
   return symbols.map((symbol) => {
-    const tick = ibkr.getQuote(symbol);
-    const { price, source } = pickQuotePrice(tick);
-    return {
-      symbol,
-      bid: tick?.bid ?? 0,
-      ask: tick?.ask ?? 0,
-      last: tick?.last ?? 0,
-      price,
-      source,
-    };
+    const q = quotes.get(symbol);
+    return { symbol, price: q?.price ?? null, session: q?.session ?? null, time: q?.time ?? null };
   });
 }

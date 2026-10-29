@@ -60,10 +60,7 @@ function createMockIBKR(): IBKRClient {
   return {
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn(),
-    setOnTick: vi.fn(),
     setOnOrderStatus: vi.fn(),
-    subscribeMarketData: vi.fn(),
-    unsubscribeMarketData: vi.fn(),
     placeMOCOrder: vi.fn(),
     placeLOCOrder: vi.fn(),
   } as unknown as IBKRClient;

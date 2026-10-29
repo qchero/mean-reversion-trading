@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { appendFileSync, existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { IBKRClient, MarketTick, OrderFill } from '../ibkr';
+import { fetchLiveQuotes, QuoteSession } from '../quotes';
 import { fetchAndComputeMetrics, evaluateLinearTarget, getLatestPrice, LinearData } from './logic';
 
 const prisma = new PrismaClient();
@@ -25,6 +26,8 @@ interface StrategyState {
   strategy: LinearStrategy;
   lots: LinearLot[];
   metrics: LinearData;
+  /** Session of the latest polled quote (unset for seeded / REPL-injected prices) */
+  priceSession?: QuoteSession;
 }
 
 interface PendingContext {
@@ -107,7 +110,7 @@ export class LinearTradingEngine {
     console.log('[LinearEngine] Starting...');
     await this.ibkr.connect();
 
-    this.ibkr.setOnTick((tick) => this.handleTick(tick));
+    // IBKR is only used for orders + fills; prices are polled from Yahoo each tick (refreshPrices)
     this.ibkr.setOnOrderStatus((fill) => {
       this.handleOrderFill(fill).catch(e => console.error(`[LinearEngine] Fallback error handling order fill:`, e));
     });
@@ -278,7 +281,6 @@ export class LinearTradingEngine {
 
       for (const sym of prevSymbols) {
         if (!currentSymbols.has(sym)) {
-          if (!this.simulate) this.ibkr.unsubscribeMarketData(sym);
           this.strategies.delete(sym);
           console.log(`[LinearEngine] Removed: ${sym}`);
         }
@@ -302,7 +304,7 @@ export class LinearTradingEngine {
           this.strategies.set(strat.symbol, state);
           await this.persistMetrics(strat.id, metrics);
 
-          // Seed price from Yahoo so previews work before IBKR ticks arrive
+          // Seed price so previews work before the first quote poll (simulate mode never polls)
           if (!strat.latestPrice) {
             const snap = await getLatestPrice(strat.symbol);
             if (snap.price) {
@@ -311,7 +313,6 @@ export class LinearTradingEngine {
             }
           }
 
-          if (!this.simulate) this.ibkr.subscribeMarketData(strat.symbol);
           console.log(`[LinearEngine] Added: ${strat.symbol} | SMA200: $${metrics.sma200.toFixed(2)} | Price: $${state.strategy.latestPrice?.toFixed(2) ?? '?'}`);
         } else {
           state.strategy = strat;
@@ -411,6 +412,24 @@ export class LinearTradingEngine {
 
     state.strategy.latestPrice = currentPrice;
     state.strategy.latestPriceAt = new Date();
+    state.priceSession = undefined;
+  }
+
+  /** Poll Yahoo for every strategy's latest pre / regular / post-market price (one batched request) */
+  private async refreshPrices() {
+    if (this.strategies.size === 0) return;
+    try {
+      const quotes = await fetchLiveQuotes([...this.strategies.keys()]);
+      for (const [symbol, state] of this.strategies) {
+        const q = quotes.get(symbol);
+        if (!q) continue;
+        state.strategy.latestPrice = q.price;
+        state.strategy.latestPriceAt = q.time;
+        state.priceSession = q.session;
+      }
+    } catch (e) {
+      console.error(`[LinearEngine] Quote refresh failed, keeping last prices:`, (e as Error).message);
+    }
   }
 
   /**
@@ -429,6 +448,9 @@ export class LinearTradingEngine {
   }
 
   private async tickInner() {
+    // Simulate mode prices come from REPL injects, which a poll would overwrite
+    if (!this.simulate) await this.refreshPrices();
+
     // ── Preview: evaluate all strategies ──
     const actionable: { state: StrategyState; price: number; evalResult: EvalResult }[] = [];
 
@@ -458,7 +480,7 @@ export class LinearTradingEngine {
         }
       }
       const unclampedStr = evalResult.unclampedTargetShares !== evalResult.targetShares ? ` [unc ${evalResult.unclampedTargetShares}]` : '';
-      console.log(`  ${symbol.padEnd(5)} $${price.toFixed(2).padStart(8)} | ${evalResult.sigmaBelow.toFixed(2).padStart(6)}σ | ${String(currentShares).padStart(3)}→${String(evalResult.targetShares).padStart(3)} (${diffStr.padStart(4)})${unclampedStr} | ${actionStr}`);
+      console.log(`  ${symbol.padEnd(5)} $${price.toFixed(2).padStart(8)} ${(state.priceSession ?? '').padEnd(7)} | ${evalResult.sigmaBelow.toFixed(2).padStart(6)}σ | ${String(currentShares).padStart(3)}→${String(evalResult.targetShares).padStart(3)} (${diffStr.padStart(4)})${unclampedStr} | ${actionStr}`);
 
       if (evalResult.action) {
         actionable.push({ state, price, evalResult });

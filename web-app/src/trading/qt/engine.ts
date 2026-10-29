@@ -36,9 +36,6 @@ function fmtUsd(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
-/** Grace period after subscribing for the first IBKR ticks to arrive. */
-const WARMUP_MS = 3000;
-
 /** ET wall-clock time the MOO submit window opens; orders fire in [TRIGGER_ET_TIME, 9:30). */
 const TRIGGER_ET_TIME = '09:20';
 /** Preview + trigger-check cadence. */
@@ -80,16 +77,13 @@ export class QtEngine {
       console.log(`[qt] Last placed: ${this.config.lastPlacedDate}`);
     }
 
-    // Both modes connect + stream IBKR quotes; only placement + write-back are
+    // Both modes connect to IBKR + poll Yahoo quotes; only placement + write-back are
     // gated on live (simulate = live minus the side effects).
     const universe = [...new Set([...this.config.tickers, ...Object.keys(this.config.positions)])];
     await this.ibkr.connect();
-    for (const sym of universe) this.ibkr.subscribeMarketData(sym);
-    console.log(`[qt] Subscribed to IBKR market data for ${universe.length} symbol(s); warming up...`);
-    await this.sleep(WARMUP_MS);
 
     while (!this.stopped) {
-      const quotes = readQuotes(this.ibkr, universe);
+      const quotes = await readQuotes(universe);
       this.logQuotes(quotes);
       const prices = Object.fromEntries(quotes.map((q) => [q.symbol, q.price]));
       const plan = computeRebalancePlan(this.config, prices);
@@ -195,17 +189,17 @@ export class QtEngine {
     return entries.map(([s, q]) => `${s}:${q}`).join('  ');
   }
 
-  /** Log raw bid/ask/last per ticker so the best sizing field can be judged. */
+  /** Log each ticker's sizing price with the session + trade time it came from. */
   private logQuotes(quotes: QuoteLine[]): void {
-    const f = (n: number) => (n > 0 ? `$${n.toFixed(2)}` : '--');
-    console.log(`\n[${etClock()} ET] IBKR quotes (bid / ask / last → sizing):`);
+    const tradedAt = (t: Date) => t.toLocaleString('en-US', {
+      timeZone: 'America/New_York', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    console.log(`\n[${etClock()} ET] Yahoo quotes (price / session / traded at ET):`);
     for (const q of quotes) {
-      const chosen = q.price !== null ? `$${q.price.toFixed(2)} (${q.source})` : '-- (no quote)';
-      console.log(
-        `  ${q.symbol.padEnd(6)} ` +
-        `bid ${f(q.bid).padStart(9)}  ask ${f(q.ask).padStart(9)}  last ${f(q.last).padStart(9)}` +
-        `  →  ${chosen}`,
-      );
+      const line = q.price !== null && q.session && q.time
+        ? `$${q.price.toFixed(2).padStart(9)}  ${q.session.padEnd(7)}  ${tradedAt(q.time)}`
+        : '-- (no quote)';
+      console.log(`  ${q.symbol.padEnd(6)} ${line}`);
     }
   }
 
