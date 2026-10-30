@@ -20,11 +20,12 @@ Polygon.io API                    Prisma ORM (Supabase Postgres)
                                      ├── DailyCandle   — cached OHLCV (symbol+date unique)
                                      └── SymbolCache   — SMA200, sigma, latest price per symbol
 
-Trading Engine (separate process)
+Trading engines (separate processes: v2 `npm run trade`, qt `npm run qt`)
+   │
+   ├── Yahoo quotes (quotes.ts) — polled each tick (live) / injectPrice (v2 simulate)
    │
    │  @stoqey/ib (TWS API)
-   │    ├── subscribeMarketData (live) / injectTick (simulate)
-   │    ├── placeMarketOrder
+   │    ├── placeMOCOrder / placeLOCOrder (v2), placeMOOOrder (qt)
    │    └── orderStatus callbacks
    │
    ▼
@@ -38,7 +39,7 @@ IB Gateway (port 4001)
 3. **Live price:** `getLatestPrice` fetches Polygon snapshot (cached 60s via Next.js `revalidate`)
 4. **Parameter editing:** Debounced (1s) auto-save via `updateStrategy` — no page reload needed. Locked when Auto Execute is on.
 5. **Manual trade recording:** Buy/sell modals in StrategyCard → `createTrade` / `updateTrade` → Trade table. Disabled when Auto Execute is on.
-6. **Auto trading:** Engine monitors prices → places market orders → IBKR fills → `recordTrade` writes to Trade table
+6. **Auto trading:** v2 engine polls Yahoo prices → places MOC/LOC orders once daily at 15:48 ET → IBKR fills → trade + lots written to LinearTrade / LinearLot
 7. **Order notifications:** Dashboard polls `getRecentOrderEvents` every 5s → toast notifications for fills/cancels
 
 ### Key Math (polygon.ts)
@@ -80,32 +81,25 @@ When modifying `prisma/schema.prisma`:
 
 ## Trading Engine
 
-The engine (`src/trading/`) runs as a standalone Node.js process sharing the same database.
+The engines (`src/trading/`) run as standalone Node.js processes sharing the same database. Prices come
+from Yahoo; IBKR is only used for order placement and fill callbacks (no market data subscription).
 
 ### Components
 
 | File | Purpose |
 |------|---------|
-| `run.ts` | Entry point. Parses CLI args, connects IBKRClient, starts engine. `--simulate` enables price injection REPL. |
-| `engine.ts` | Core logic. Loads auto-execute strategies every 60s, evaluates ticks, places orders, records trades. |
-| `ibkr.ts` | TWS API wrapper. Socket connection, market data streaming, market order placement, order status callbacks, error→cancel propagation. |
-| `sim-repl.ts` | Stdin REPL for simulate mode. Injects ticks into the engine. |
+| `quotes.ts` | Batched Yahoo quotes; picks the most recent of the pre-market / regular / post-market prices. Shared by v2, qt and the web app (`getLatestPrice`). |
+| `ibkr.ts` | TWS API wrapper. Socket connection + auto-reconnect, MOC / LOC / MOO order placement, order status callbacks. |
+| `v2/run.ts` | v2 entry point. Parses CLI args, connects IBKRClient, starts engine. `--simulate` enables the price injection REPL. |
+| `v2/engine.ts` | Linear strategy engine. Reloads strategies every 60s, polls prices each tick, places orders once daily at 15:48 ET, records fills. |
+| `v2/sim-repl.ts` | Stdin REPL for simulate mode. Injects prices into the engine. |
+| `qt/` | QuantGT monthly rebalancer — see `qt/SPEC.md`. |
 
-### Order lifecycle
+### Tick evaluation logging (v2)
 
-1. Price crosses threshold → engine places market order via IBKR
-2. Ticker is locked (no duplicate orders for same symbol)
-3. IBKR fills → `handleOrderStatus` fires → DB Order updated → Trade recorded → ticker unlocked
-4. IBKR error/reject → treated as cancellation → ticker unlocked
-5. On engine restart → reconciles pending DB orders with IBKR via `reqAllOpenOrders`; orphaned orders marked cancelled after 5s
-
-### Tick evaluation logging
-
-Every tick logs detailed evaluation for each step:
+Every tick logs one line per auto-execute strategy, including which session the price came from:
 ```
-[Tick] AAPL bid=$172.50 ask=$172.55 | SMA200=$178.30 σ=1.42%
-  Step 1: BUY  target=$160.58 ask=$172.55 gap=$11.97
-  Step 2: BUY  target=$155.52 ask=$172.55 gap=$17.03
+  GOOGL $  287.40 regular |   7.83σ |   0→ 40 ( +40) | BUY 40
 ```
 
 ---
@@ -130,7 +124,7 @@ Every tick logs detailed evaluation for each step:
 | `src/app/page.tsx` | Dashboard page — batch loads strategies, metrics, trades |
 | `src/components/StrategyCard.tsx` | Strategy detail card with live params, step preview, trade/order history |
 | `src/components/StrategyForm.tsx` | New strategy creation form |
-| `src/trading/engine.ts` | Auto-trading engine with market orders |
-| `src/trading/ibkr.ts` | IBKR TWS API connection wrapper |
-| `src/trading/run.ts` | Trading engine entry point (live + simulate modes) |
-| `src/trading/sim-repl.ts` | Simulate mode price injection REPL |
+| `src/trading/quotes.ts` | Yahoo pre / regular / post-market quotes |
+| `src/trading/ibkr.ts` | IBKR TWS API connection wrapper (orders + fills) |
+| `src/trading/v2/` | Linear strategy engine (`npm run trade`, `npm run trade:sim`) |
+| `src/trading/qt/` | QuantGT monthly rebalancer (`npm run qt`, `npm run qt:sim`) |

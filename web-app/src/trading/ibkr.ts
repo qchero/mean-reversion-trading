@@ -1,8 +1,9 @@
 /**
  * IBKR TWS API connection wrapper.
  *
- * Manages the socket connection to IB Gateway, order placement/cancellation,
- * streaming market data, and order status tracking via callbacks.
+ * Manages the socket connection to IB Gateway (with auto-reconnect), order placement,
+ * and order status tracking via callbacks. Prices come from Yahoo (see quotes.ts),
+ * so no IBKR market data subscription is needed.
  */
 
 import {
@@ -18,13 +19,6 @@ import {
 
 // ── Types ──
 
-export interface MarketTick {
-  symbol: string;
-  bid: number;
-  ask: number;
-  last: number;
-}
-
 export interface OrderFill {
   ibkrOrderId: number;
   status: string;       // Submitted, PreSubmitted, Filled, Cancelled, Inactive
@@ -33,25 +27,14 @@ export interface OrderFill {
   avgFillPrice: number;
 }
 
-export type OnTickCallback = (tick: MarketTick) => void;
 export type OnOrderStatusCallback = (fill: OrderFill) => void;
-export type OnReconnectCallback = () => void;
 
 // ── IBKR Client ──
 
 export class IBKRClient {
   private ib: IBApi;
   private nextOrderId: number = 0;
-  private connected = false;
-  private onTick: OnTickCallback | null = null;
   private onOrderStatus: OnOrderStatusCallback | null = null;
-  private onReconnect: OnReconnectCallback | null = null;
-
-  // Market data tracking: reqId → symbol, and symbol → latest bid/ask
-  private reqIdToSymbol = new Map<number, string>();
-  private symbolToReqId = new Map<string, number>();
-  private nextReqId = 1000;
-  private quotes = new Map<string, MarketTick>();
 
   // Reconnection state
   private intentionalDisconnect = false;
@@ -71,12 +54,10 @@ export class IBKRClient {
 
   private setupEventHandlers() {
     this.ib.on(EventName.connected, () => {
-      this.connected = true;
       console.log(`[IBKR] Connected to ${this.host}:${this.port}`);
     });
 
     this.ib.on(EventName.disconnected, () => {
-      this.connected = false;
       console.log('[IBKR] Disconnected');
       if (!this.intentionalDisconnect && !this.reconnecting) {
         this.scheduleReconnect();
@@ -114,25 +95,6 @@ export class IBKRClient {
         }
       },
     );
-
-    // Streaming market data — tick price updates
-    this.ib.on(EventName.tickPrice, (reqId: number, tickType: number, price: number) => {
-      const symbol = this.reqIdToSymbol.get(reqId);
-      if (!symbol || price <= 0) return;
-
-      const tick = this.quotes.get(symbol) || { symbol, bid: 0, ask: 0, last: 0 };
-
-      // tickType: 1 = bid, 2 = ask, 4 = last
-      if (tickType === 1) tick.bid = price;
-      else if (tickType === 2) tick.ask = price;
-      else if (tickType === 4) tick.last = price;
-
-      this.quotes.set(symbol, tick);
-
-      if (tick.bid > 0 && tick.ask > 0 && this.onTick) {
-        this.onTick(tick);
-      }
-    });
   }
 
   // ── Connection ──
@@ -156,77 +118,7 @@ export class IBKRClient {
     this.ib.disconnect();
   }
 
-  isConnected(): boolean {
-    return this.connected;
-  }
-
-  // ── Order Reconciliation ──
-
-  /**
-   * Request status of all open orders from IBKR.
-   * Triggers orderStatus callbacks for each, letting the engine reconcile.
-   */
-  reqAllOpenOrders() {
-    this.ib.reqAllOpenOrders();
-  }
-
-  // ── Market Data ──
-
-  subscribeMarketData(symbol: string) {
-    if (this.symbolToReqId.has(symbol)) return; // already subscribed
-
-    const reqId = this.nextReqId++;
-    this.reqIdToSymbol.set(reqId, symbol);
-    this.symbolToReqId.set(symbol, reqId);
-
-    const contract = this.stockContract(symbol);
-    // genericTickList "" = default ticks, snapshot = false for streaming
-    this.ib.reqMktData(reqId, contract, '', false, false);
-    console.log(`[IBKR] Subscribed to market data: ${symbol} (reqId=${reqId})`);
-  }
-
-  unsubscribeMarketData(symbol: string) {
-    const reqId = this.symbolToReqId.get(symbol);
-    if (reqId === undefined) return;
-
-    this.ib.cancelMktData(reqId);
-    this.reqIdToSymbol.delete(reqId);
-    this.symbolToReqId.delete(symbol);
-    this.quotes.delete(symbol);
-    console.log(`[IBKR] Unsubscribed: ${symbol}`);
-  }
-
-  getQuote(symbol: string): MarketTick | undefined {
-    return this.quotes.get(symbol);
-  }
-
   // ── Orders ──
-
-  /**
-   * Place a market order (whole shares). Returns the IBKR order ID.
-   */
-  placeMarketOrder(
-    symbol: string,
-    action: 'BUY' | 'SELL',
-    quantity: number,
-  ): number {
-    const orderId = this.nextOrderId++;
-    const contract = this.stockContract(symbol);
-
-    const order: IBOrder = {
-      action: action === 'BUY' ? OrderAction.BUY : OrderAction.SELL,
-      orderType: OrderType.MKT,
-      totalQuantity: quantity,
-      tif: TimeInForce.DAY,
-      transmit: true,
-    };
-
-    this.ib.placeOrder(orderId, contract, order);
-    console.log(
-      `[IBKR] Placed ${action} MKT order #${orderId}: ${quantity} ${symbol}`,
-    );
-    return orderId;
-  }
 
   /**
    * Place a Limit on Close (LOC) order. Returns the IBKR order ID.
@@ -310,23 +202,10 @@ export class IBKRClient {
     return orderId;
   }
 
-  cancelOrder(ibkrOrderId: number) {
-    this.ib.cancelOrder(ibkrOrderId);
-    console.log(`[IBKR] Cancel requested for order #${ibkrOrderId}`);
-  }
-
   // ── Callbacks ──
-
-  setOnTick(cb: OnTickCallback) {
-    this.onTick = cb;
-  }
 
   setOnOrderStatus(cb: OnOrderStatusCallback) {
     this.onOrderStatus = cb;
-  }
-
-  setOnReconnect(cb: OnReconnectCallback) {
-    this.onReconnect = cb;
   }
 
   // ── Reconnection ──
@@ -347,20 +226,10 @@ export class IBKRClient {
       this.reconnecting = false;
       console.log('[IBKR] Reconnected successfully');
       this.reconnectAttempt = 0;
-      this.resubscribeAll();
-      if (this.onReconnect) this.onReconnect();
     } catch (err) {
       this.reconnecting = false;
       console.error('[IBKR] Reconnect failed:', (err as Error).message);
       this.scheduleReconnect();
-    }
-  }
-
-  private resubscribeAll() {
-    for (const [symbol, reqId] of this.symbolToReqId) {
-      const contract = this.stockContract(symbol);
-      this.ib.reqMktData(reqId, contract, '', false, false);
-      console.log(`[IBKR] Re-subscribed: ${symbol} (reqId=${reqId})`);
     }
   }
 

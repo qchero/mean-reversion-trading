@@ -26,7 +26,7 @@ The strategy buys when a stock drops far enough below its 200-day SMA, measured 
 | UI | Mantine v8 + Tabler Icons |
 | ORM | Prisma 6 |
 | Database | Supabase Postgres (cloud) |
-| Market Data | Polygon.io REST API (daily candles + snapshots) |
+| Market Data | Yahoo Finance via `yahoo-finance2` (daily history + live quotes) |
 | Broker | Interactive Brokers TWS API via `@stoqey/ib` |
 | Language | TypeScript (strict) |
 
@@ -42,34 +42,38 @@ npm run dev                   # http://localhost:3000
 
 ## Auto-Trading
 
-The trading engine runs as a separate process alongside the web server, connecting to IB Gateway via the TWS API.
+The trading engines run as separate processes alongside the web server. Prices come from Yahoo (`src/trading/quotes.ts`: the most recent of the pre-market / regular / post-market prices); IB Gateway is only used to place orders and receive fills, so no IBKR market data subscription is needed.
 
 ```bash
-# Live trading (connects to IB Gateway on port 4001)
+# Linear strategy engine (v2) — live, places real orders via IB Gateway on port 4001
 npm run trade
 
-# Simulation mode (connects to IB Gateway paper account, manual price injection via stdin)
+# v2 simulation mode — manual price injection via stdin REPL
 npm run trade:sim
+
+# QuantGT monthly rebalancer — see src/trading/qt/SPEC.md
+npm run qt
+npm run qt:sim
 ```
 
-### Simulate mode commands
+### Simulate mode commands (`trade:sim`)
 
 ```
-AAPL 170 171    Set bid=170 ask=171 for AAPL (triggers buy/sell check)
-AAPL 170        Shorthand (bid=ask)
-reload          Reload strategies from DB (picks up auto-execute changes)
-help            Show all commands
+AAPL 170          Set price → evaluate → simulate fill if actionable
+preview AAPL      Preview evaluation using last set price (dry run)
+order AAPL        Place a REAL LOC order via IBKR using last set price
+list              Show all active strategies and positions
+reload            Reload strategies from DB
+help              Show all commands
 ```
 
-### How it works
+### How v2 works
 
-1. Engine loads all strategies with Auto Execute enabled
-2. Subscribes to real-time market data (live mode) or accepts manual price injection (simulate mode)
-3. When ask <= step buy price → places market order (whole shares)
-4. When bid >= step sell price → places market order to close position
-5. On fill, records a Trade in the database
-6. Ticker is locked while an order is pending (no duplicate orders)
-7. On restart, reconciles pending orders with IBKR
+1. Engine loads Linear strategies from the DB every 60s (15 min while the market is closed)
+2. Each tick polls Yahoo for every strategy's latest price (live mode) or uses REPL-injected prices (simulate mode)
+3. Target shares scale linearly with how far price is below SMA200 (in σ, between the strategy's band)
+4. Once daily at 15:48 ET: buys go out as Market-on-Close, sells as Limit-on-Close just above (+0.1%) the sold lots' max cost basis (no-loss rule)
+5. On fill, records the trade + lots in the database (fills that can't be written are journaled to `unrecorded-fills.jsonl`)
 
 ### Prerequisites
 
@@ -92,10 +96,10 @@ web-app/
 │   │   ├── StrategyForm.tsx   # New strategy form (symbol, j, k, steps, amount)
 │   │   └── StrategyCard.tsx   # Strategy card: metrics, live params, step table, trade/order history
 │   ├── trading/
-│   │   ├── run.ts             # Entry point: CLI args, connects to IBKR, starts engine
-│   │   ├── engine.ts          # Trading logic: price monitoring, order placement, trade recording
-│   │   ├── ibkr.ts            # IBKR TWS API wrapper: connection, market data, orders
-│   │   └── sim-repl.ts        # Simulate mode stdin REPL for price injection
+│   │   ├── ibkr.ts            # IBKR TWS API wrapper: connection, reconnect, orders, fill callbacks
+│   │   ├── quotes.ts          # Yahoo quotes (pre / regular / post-market) shared by v2, qt and the UI
+│   │   ├── v2/                # Linear strategy engine (`npm run trade`)
+│   │   └── qt/                # QuantGT monthly rebalancer (`npm run qt`)
 │   └── lib/
 │       ├── polygon.ts         # Polygon API: fetch candles, cache, SMA/sigma calc, snapshots
 │       └── prisma.ts          # Prisma singleton client
