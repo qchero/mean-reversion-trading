@@ -53,7 +53,6 @@ const STRATEGY = {
   createdAt: new Date(), updatedAt: new Date(), lots: [],
 };
 const METRICS = { sma100: 100, sma200: 100, sma300: 100, sigma: 0.02, lastClose: 100, lastDate: '2026-10-16' };
-const TICK_96 = { symbol: 'AAPL', bid: 96, ask: 96, last: 96 };
 const TOTAL_RETRY_MS = [5, 15, 30, 60, 120, 240, 480].reduce((a, b) => a + b, 0) * 1000;
 
 function createMockIBKR(): IBKRClient {
@@ -99,7 +98,7 @@ describe('LinearTradingEngine fill recording', () => {
 
   it('books a BUY fill as one transaction with a pre-generated trade id', async () => {
     engine = await startEngine();
-    await engine.injectTick(TICK_96);
+    await engine.injectPrice('AAPL', 96);
 
     const fills = fillTransactions();
     expect(fills).toHaveLength(1);
@@ -118,7 +117,7 @@ describe('LinearTradingEngine fill recording', () => {
     });
     engine = await startEngine();
 
-    const done = engine.injectTick(TICK_96);
+    const done = engine.injectPrice('AAPL', 96);
     await vi.advanceTimersByTimeAsync(5_000 + 15_000);
     await done;
 
@@ -135,7 +134,7 @@ describe('LinearTradingEngine fill recording', () => {
     mockPrisma.linearTrade.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => ({ id: where.id }));
     engine = await startEngine();
 
-    const done = engine.injectTick(TICK_96);
+    const done = engine.injectPrice('AAPL', 96);
     await vi.advanceTimersByTimeAsync(5_000);
     await done;
 
@@ -152,7 +151,7 @@ describe('LinearTradingEngine fill recording', () => {
     });
     engine = await startEngine();
 
-    const done = engine.injectTick(TICK_96);
+    const done = engine.injectPrice('AAPL', 96);
     await vi.advanceTimersByTimeAsync(TOTAL_RETRY_MS);
     await done;
 
@@ -165,7 +164,7 @@ describe('LinearTradingEngine fill recording', () => {
     // Next execution sees the journal entry and refuses to trade AAPL again
     mockFs.existsSync.mockReturnValue(true);
     mockFs.readFileSync.mockReturnValue(line);
-    await engine.injectTick(TICK_96);
+    await engine.injectPrice('AAPL', 96);
     expect(fillTransactions()).toHaveLength(8);
   });
 });
@@ -193,10 +192,10 @@ describe('LinearTradingEngine DB writes per tick', () => {
     engine = await startEngine(); // startup tick writes the first heartbeat
     mockPrisma.$transaction.mockClear();
 
-    await engine.injectTick(TICK_96);                                  // new price, heartbeat not due
-    await engine.injectTick(TICK_96);                                  // nothing changed → no write at all
+    await engine.injectPrice('AAPL', 96); // new price, heartbeat not due
+    await engine.injectPrice('AAPL', 96); // nothing changed → no write at all
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    await engine.injectTick({ ...TICK_96, last: 95, bid: 95, ask: 95 }); // new price + heartbeat due
+    await engine.injectPrice('AAPL', 95); // new price + heartbeat due
 
     const batches = mockPrisma.$transaction.mock.calls.map(opsOf);
     expect(batches).toEqual([

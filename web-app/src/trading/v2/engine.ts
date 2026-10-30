@@ -2,7 +2,7 @@ import { PrismaClient, LinearLot, LinearStrategy } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { appendFileSync, existsSync, readFileSync } from 'fs';
 import path from 'path';
-import { IBKRClient, MarketTick, OrderFill } from '../ibkr';
+import { IBKRClient, OrderFill } from '../ibkr';
 import { fetchLiveQuotes, QuoteSession } from '../quotes';
 import { fetchAndComputeMetrics, evaluateLinearTarget, getLatestPrice, LinearData } from './logic';
 
@@ -151,8 +151,13 @@ export class LinearTradingEngine {
 
   // ── Public REPL methods ──
 
-  async injectTick(tick: MarketTick) {
-    this.handleTick(tick);
+  async injectPrice(symbol: string, price: number) {
+    const state = this.strategies.get(symbol);
+    if (state && price > 0) {
+      state.strategy.latestPrice = price;
+      state.strategy.latestPriceAt = new Date();
+      state.priceSession = undefined;
+    }
     this.lastBatchExecutedAt = null;
     await this.tick();
   }
@@ -376,7 +381,7 @@ export class LinearTradingEngine {
    * and no heartbeat is due, nothing is written at all.
    */
   private async persistPricesAndHeartbeat() {
-    // Snapshot now: ticks can update latestPrice while the transaction is in flight
+    // Snapshot now: REPL price injects can update latestPrice while the transaction is in flight
     const changed = [...this.strategies.values()]
       .map(s => ({ id: s.strategy.id, latestPrice: s.strategy.latestPrice, latestPriceAt: s.strategy.latestPriceAt }))
       .filter(p => p.latestPrice && p.latestPrice !== this.lastPersistedPrice.get(p.id));
@@ -401,18 +406,6 @@ export class LinearTradingEngine {
     } catch (e) {
       console.error(`[LinearEngine] Failed to persist prices/heartbeat:`, (e as Error).message);
     }
-  }
-
-  private handleTick(tick: MarketTick) {
-    const state = this.strategies.get(tick.symbol);
-    if (!state) return;
-
-    const currentPrice = tick.last > 0 ? tick.last : ((tick.bid + tick.ask) / 2);
-    if (currentPrice <= 0) return;
-
-    state.strategy.latestPrice = currentPrice;
-    state.strategy.latestPriceAt = new Date();
-    state.priceSession = undefined;
   }
 
   /** Poll Yahoo for every strategy's latest pre / regular / post-market price (one batched request) */

@@ -72,7 +72,7 @@ Commands:
         }
 
       } else {
-        // Default: SYMBOL PRICE — inject tick and simulate
+        // Default: SYMBOL PRICE — inject price and simulate
         const symbol = parts[0].toUpperCase();
         const price = parseFloat(parts[1]);
 
@@ -80,7 +80,7 @@ Commands:
           console.log('  Unknown command. Type "help" for usage.');
         } else {
           console.log(`  Injecting ${symbol} @ $${price.toFixed(2)}...`);
-          await engine.injectTick({ symbol, bid: price, ask: price, last: price });
+          await engine.injectPrice(symbol, price);
         }
       }
     } catch (err: any) {
